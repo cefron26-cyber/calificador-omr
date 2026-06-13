@@ -31,7 +31,8 @@ jobs:
           pip install --upgrade buildozer cython==0.29.34
 
       - name: Compilar el APK (debug)
-        run: buildozer android debug
+        # 'yes |' acepta automáticamente las licencias del SDK de Android
+        run: yes | buildozer android debug
 
       - name: Subir el APK como artefacto descargable
         uses: actions/upload-artifact@v4
