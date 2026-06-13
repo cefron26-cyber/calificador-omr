@@ -1,4 +1,4 @@
-# Calificador OMR — Liceo Sahagún
+# Calificador OMR 
 
 Aplicación de escritorio (hecha en **Kivy**, Python) que califica exámenes de opción
 múltiple a partir de **fotos** de las hojas de respuestas. Lee el código del
