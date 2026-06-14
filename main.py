@@ -1438,48 +1438,48 @@ class CalificarScreen(Screen):
     _COD_CAMARA = 0xC0FE
 
     def _tomar_foto_android(self):
-        """Abre la cámara con el Intent nativo de Android y espera el resultado.
-        Es más confiable que plyer: el sistema nos avisa cuando la foto está
-        lista mediante on_activity_result."""
+        """Abre la cámara con el Intent nativo. Usa MediaStore para crear un
+        destino donde la app de cámara SÍ puede escribir en Android 11+."""
         try:
             from jnius import autoclass, cast  # type: ignore
             from android import activity  # type: ignore
-        except Exception as e:
-            aviso("Cámara", f"No se pudo acceder a la cámara: {e}")
-            return
-        # Permite pasar la ruta file:// a la app de cámara sin que Android cierre la app.
-        try:
-            StrictMode = autoclass("android.os.StrictMode")
-            StrictMode.disableDeathOnFileUriExposure()
-        except Exception:
-            pass
-
-        destino = self._ruta_captura()
-        try:
-            destino.parent.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-        self._destino_foto = destino
-
-        try:
             PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            ctx = PythonActivity.mActivity
             Intent = autoclass("android.content.Intent")
             MediaStore = autoclass("android.provider.MediaStore")
-            Uri = autoclass("android.net.Uri")
-            File = autoclass("java.io.File")
-
-            uri = Uri.fromFile(File(str(destino)))
+            ContentValues = autoclass("android.content.ContentValues")
+            Images = autoclass("android.provider.MediaStore$Images$Media")
+            VERSION = autoclass("android.os.Build$VERSION")
+            Integer = autoclass("java.lang.Integer")
+        except Exception as e:
+            aviso("Cámara", "No se pudo acceder a la cámara: %s" % e)
+            return
+        try:
+            resolver = ctx.getContentResolver()
+            valores = ContentValues()
+            valores.put("_display_name", "captura_omr_tmp.jpg")
+            valores.put("mime_type", "image/jpeg")
+            sdk = VERSION.SDK_INT
+            if sdk >= 29:
+                valores.put("relative_path", "Pictures")
+                valores.put("is_pending", Integer(1))  # oculta la foto de la galería
+            uri = resolver.insert(Images.EXTERNAL_CONTENT_URI, valores)
+            if uri is None:
+                aviso("Cámara", "No se pudo preparar el almacenamiento de la foto.")
+                return
+            self._foto_uri = uri
             intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
             intent.putExtra(MediaStore.EXTRA_OUTPUT, cast("android.os.Parcelable", uri))
-
+            intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             activity.bind(on_activity_result=self._on_cam_result)
-            PythonActivity.mActivity.startActivityForResult(intent, self._COD_CAMARA)
+            ctx.startActivityForResult(intent, self._COD_CAMARA)
         except Exception as e:
             try:
                 activity.unbind(on_activity_result=self._on_cam_result)
             except Exception:
                 pass
-            aviso("Cámara", f"No se pudo abrir la cámara: {e}")
+            aviso("Cámara", "No se pudo abrir la cámara: %s" % e)
 
     def _on_cam_result(self, request, result, intent):
         if request != self._COD_CAMARA:
@@ -1489,68 +1489,113 @@ class CalificarScreen(Screen):
             activity.unbind(on_activity_result=self._on_cam_result)
         except Exception:
             pass
-        destino = getattr(self, "_destino_foto", None)
-        # Procesamos en el hilo principal de Kivy (UI segura) tras un instante,
-        # dándole tiempo a la cámara de terminar de escribir el archivo.
-        Clock.schedule_once(
-            lambda dt: self._procesar_captura(result, destino), 0.4)
+        Clock.schedule_once(lambda dt: self._procesar_captura_uri(result), 0.4)
 
-    def _foto_lista(self, ruta_foto):
-        """Callback de plyer (iOS): delega en el procesador con diagnóstico."""
-        p = Path(str(ruta_foto)) if ruta_foto else None
-        self._procesar_captura(-1, p)
+    def _eliminar_uri(self, resolver, uri):
+        try:
+            if uri is not None:
+                resolver.delete(uri, None, None)
+        except Exception:
+            pass
 
-    def _procesar_captura(self, result, destino):
-        """Procesa la foto tomada, reportando cada paso para diagnóstico.
-        Si algo falla, muestra exactamente en qué punto y por qué."""
+    def _procesar_captura_uri(self, result):
+        """Lee la foto desde la URI de MediaStore, la copia a la carpeta interna
+        (que sí podemos leer), la califica y reporta cada paso (diagnóstico)."""
         pasos = []
         try:
-            pasos.append("Código de resultado: %s  (OK = -1)" % result)
-            ruta = str(destino) if destino else ""
-            pasos.append("Ruta de la foto: %s" % (ruta or "(vacía)"))
-            p = Path(ruta) if ruta else None
-            existe = bool(p and p.exists())
-            pasos.append("¿El archivo existe?: %s" % ("sí" if existe else "NO"))
-            tam = p.stat().st_size if existe else 0
-            if existe:
-                pasos.append("Tamaño del archivo: %d bytes" % tam)
+            from jnius import autoclass  # type: ignore
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            ctx = PythonActivity.mActivity
+            resolver = ctx.getContentResolver()
+            uri = getattr(self, "_foto_uri", None)
 
+            pasos.append("Código de resultado: %s  (OK = -1)" % result)
             if result not in (-1, None):
-                pasos.append(">> La cámara no devolvió OK (cancelado o error).")
+                pasos.append(">> La cámara canceló o falló.")
+                self._eliminar_uri(resolver, uri)
                 aviso("Diagnóstico de la cámara", "\n".join(pasos))
                 return
-            if not existe or tam == 0:
-                pasos.append(">> No se encontró la foto guardada (o está vacía).")
+            if uri is None:
+                pasos.append(">> No hay destino para la foto.")
+                aviso("Diagnóstico de la cámara", "\n".join(pasos))
+                return
+
+            File = autoclass("java.io.File")
+            FileOutputStream = autoclass("java.io.FileOutputStream")
+            FileUtils = autoclass("android.os.FileUtils")
+            destino = Path(App.get_running_app().user_data_dir) / "captura_omr.jpg"
+            istream = resolver.openInputStream(uri)
+            if istream is None:
+                pasos.append(">> No se pudo abrir la foto guardada.")
+                self._eliminar_uri(resolver, uri)
+                aviso("Diagnóstico de la cámara", "\n".join(pasos))
+                return
+            ostream = FileOutputStream(File(str(destino)))
+            copiados = FileUtils.copy(istream, ostream)
+            try:
+                istream.close()
+                ostream.close()
+            except Exception:
+                pass
+            pasos.append("Bytes copiados: %s" % copiados)
+            self._eliminar_uri(resolver, uri)  # no deja rastro en la galería
+
+            if not destino.exists() or destino.stat().st_size == 0:
+                pasos.append(">> La copia de la foto quedó vacía.")
                 aviso("Diagnóstico de la cámara", "\n".join(pasos))
                 return
 
             import cv2
-            import lector_omr as L
-            img = cv2.imread(str(p))
+            img = cv2.imread(str(destino))
+            try:
+                destino.unlink()
+            except Exception:
+                pass
             pasos.append("OpenCV leyó la imagen: %s" % ("sí" if img is not None else "NO"))
             if img is not None:
                 pasos.append("Dimensiones: %dx%d" % (img.shape[1], img.shape[0]))
-            try:
-                p.unlink()
-            except Exception:
-                pass
             if img is None:
                 pasos.append(">> OpenCV no pudo leer la foto.")
                 aviso("Diagnóstico de la cámara", "\n".join(pasos))
                 return
+        except Exception as e:
+            import traceback
+            pasos.append(">> ERROR: %s" % e)
+            pasos.append(traceback.format_exc())
+            aviso("Diagnóstico de la cámara", "\n".join(pasos))
+            return
+        self._calificar_imagen(img)
 
+    def _foto_lista(self, ruta_foto):
+        """Callback de plyer (iOS): lee la foto del archivo y la califica."""
+        p = Path(str(ruta_foto)) if ruta_foto else None
+        if not p or not p.exists():
+            aviso("Cámara", "No se recibió la foto.")
+            return
+        import cv2
+        img = cv2.imread(str(p))
+        try:
+            p.unlink()
+        except Exception:
+            pass
+        if img is None:
+            aviso("Cámara", "La foto no se pudo leer.")
+            return
+        self._calificar_imagen(img)
+
+    def _calificar_imagen(self, img):
+        """Pasa la imagen por el lector OMR y muestra el resultado."""
+        try:
+            import cv2
+            import lector_omr as L
             clave_json = self._mapa_claves[self.sp_examen.text]
             datos = L.cargar_datos_examen(clave_json)
-            pasos.append("Examen: %s · %d preguntas" % (datos.nombre, datos.total_preguntas))
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             marcas = L.detectar_marcas(gray)
-            pasos.append("Marcas de esquina detectadas: %s"
-                         % ("sí" if marcas is not None else "NO"))
             if marcas is None:
                 aviso("No se detectó la hoja",
                       "No se vieron las 4 marcas de esquina. Repite la foto con "
-                      "buena luz, la hoja completa, plana y sin sombras.\n\n"
-                      "— Diagnóstico —\n" + "\n".join(pasos))
+                      "buena luz, la hoja completa, plana y sin sombras.")
                 return
             recta, scale = L.corregir_perspectiva(img, marcas)
             res = L.leer_respuestas(recta, datos.total_preguntas, scale)
@@ -1559,9 +1604,7 @@ class CalificarScreen(Screen):
                            if r == datos.clave.get(q))
         except Exception as e:
             import traceback
-            pasos.append(">> ERROR: %s" % e)
-            pasos.append(traceback.format_exc())
-            aviso("Diagnóstico de la cámara", "\n".join(pasos))
+            aviso("Error al procesar", "%s\n\n%s" % (e, traceback.format_exc()))
             return
 
         self.examen = datos.nombre
