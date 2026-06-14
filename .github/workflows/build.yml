@@ -39,3 +39,4 @@ jobs:
         with:
           name: CalificadorApp-APK
           path: bin/*.apk
+
