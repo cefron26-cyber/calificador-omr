@@ -1285,6 +1285,9 @@ class CalificarScreen(Screen):
             return []
 
     def _calificar(self, *_):
+        if platform == "android":
+            self._cargar_galeria_android()
+            return
         app = App.get_running_app()
         archivos = self._elegir_archivos()
         if not archivos:
@@ -1414,7 +1417,7 @@ class CalificarScreen(Screen):
 
     def _tomar_foto(self, *_):
         if platform == "android":
-            self._tomar_foto_android()
+            self._abrir_camara_c4k()
             return
         if platform == "ios":
             try:
@@ -1433,6 +1436,75 @@ class CalificarScreen(Screen):
                 aviso("Cámara", f"No se pudo abrir la cámara: {e}")
             return
         aviso("Cámara", "Función solo disponible en dispositivos android o ios.")
+
+    def _abrir_camara_c4k(self):
+        """Cámara integrada con camera4kivy (CameraX), como las apps pro:
+        vista previa en vivo dentro de la app + botón de captura."""
+        try:
+            from camera4kivy import Preview  # type: ignore
+        except Exception as e:
+            aviso("Cámara", "No se pudo iniciar la cámara integrada: %s\n\n"
+                  "Usa el botón 'Cargar foto(s) y calificar' como alternativa." % e)
+            return
+        try:
+            cont = FloatLayout()
+            self._preview = Preview(aspect_ratio="4:3",
+                                    size_hint=(1, 1), pos_hint={"x": 0, "y": 0})
+            cont.add_widget(self._preview)
+
+            btn_cap = Factory.BotonAccion(text="Capturar", size_hint=(None, None),
+                                          size=(dp(180), dp(60)),
+                                          pos_hint={"center_x": 0.5, "y": 0.03})
+            btn_cap.bind(on_release=lambda *_: self._preview.capture_photo(location="private"))
+            cont.add_widget(btn_cap)
+
+            btn_x = Factory.BotonPeligro(text="X", size_hint=(None, None),
+                                         size=(dp(54), dp(54)),
+                                         pos_hint={"right": 0.98, "top": 0.98})
+            cont.add_widget(btn_x)
+
+            self._popup_cam = Popup(title="Tomar foto de la hoja", content=cont,
+                                    size_hint=(1, 1), auto_dismiss=False)
+            btn_x.bind(on_release=lambda *_: self._popup_cam.dismiss())
+            self._popup_cam.bind(
+                on_open=lambda *_: self._preview.connect_camera(
+                    camera_id="back", filepath_callback=self._foto_c4k,
+                    enable_video=False),
+                on_pre_dismiss=lambda *_: self._desconectar_c4k())
+            self._popup_cam.open()
+        except Exception as e:
+            import traceback
+            aviso("Cámara", "Error iniciando la cámara: %s\n\n%s"
+                  % (e, traceback.format_exc()))
+
+    def _desconectar_c4k(self):
+        try:
+            self._preview.disconnect_camera()
+        except Exception:
+            pass
+
+    def _foto_c4k(self, path):
+        """camera4kivy llama esto cuando la foto quedó guardada (otro hilo)."""
+        Clock.schedule_once(lambda dt: self._tras_captura_c4k(path), 0)
+
+    def _tras_captura_c4k(self, path):
+        p = Path(str(path)) if path else None
+        if p is None or not p.exists():
+            return  # puede ser un mensaje de aviso, no una ruta real
+        try:
+            self._popup_cam.dismiss()
+        except Exception:
+            pass
+        import cv2
+        img = cv2.imread(str(p))
+        try:
+            p.unlink()
+        except Exception:
+            pass
+        if img is None:
+            aviso("Cámara", "No se pudo leer la foto capturada.")
+            return
+        self._calificar_imagen(img)
 
     # Código de petición para identificar el resultado de la cámara
     _COD_CAMARA = 0xC0FE
@@ -1459,10 +1531,8 @@ class CalificarScreen(Screen):
             valores = ContentValues()
             valores.put("_display_name", "captura_omr_tmp.jpg")
             valores.put("mime_type", "image/jpeg")
-            sdk = VERSION.SDK_INT
-            if sdk >= 29:
+            if VERSION.SDK_INT >= 29:
                 valores.put("relative_path", "Pictures")
-                valores.put("is_pending", Integer(1))  # oculta la foto de la galería
             uri = resolver.insert(Images.EXTERNAL_CONTENT_URI, valores)
             if uri is None:
                 aviso("Cámara", "No se pudo preparar el almacenamiento de la foto.")
@@ -1498,71 +1568,120 @@ class CalificarScreen(Screen):
         except Exception:
             pass
 
+    def _leer_uri_imagen(self, uri):
+        """Copia una URI content:// a un archivo temporal y la lee con OpenCV.
+        Devuelve (img, bytes_copiados); img es None si no se pudo."""
+        from jnius import autoclass  # type: ignore
+        File = autoclass("java.io.File")
+        FileOutputStream = autoclass("java.io.FileOutputStream")
+        FileUtils = autoclass("android.os.FileUtils")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        resolver = PythonActivity.mActivity.getContentResolver()
+        destino = Path(App.get_running_app().user_data_dir) / "captura_omr.jpg"
+        copiados = 0
+        try:
+            istream = resolver.openInputStream(uri)
+            if istream is not None:
+                ostream = FileOutputStream(File(str(destino)))
+                copiados = FileUtils.copy(istream, ostream)
+                try:
+                    istream.close()
+                    ostream.close()
+                except Exception:
+                    pass
+        except Exception:
+            return None, 0
+        if not destino.exists() or destino.stat().st_size == 0:
+            return None, copiados
+        import cv2
+        img = cv2.imread(str(destino))
+        try:
+            destino.unlink()
+        except Exception:
+            pass
+        return img, copiados
+
     def _procesar_captura_uri(self, result):
-        """Lee la foto desde la URI de MediaStore, la copia a la carpeta interna
-        (que sí podemos leer), la califica y reporta cada paso (diagnóstico)."""
+        """Lee la foto de la cámara (aunque devuelva 'cancelado', pues algunas
+        cámaras guardan la imagen igual) y la califica, con diagnóstico."""
         pasos = []
         try:
             from jnius import autoclass  # type: ignore
             PythonActivity = autoclass("org.kivy.android.PythonActivity")
-            ctx = PythonActivity.mActivity
-            resolver = ctx.getContentResolver()
+            resolver = PythonActivity.mActivity.getContentResolver()
             uri = getattr(self, "_foto_uri", None)
-
             pasos.append("Código de resultado: %s  (OK = -1)" % result)
-            if result not in (-1, None):
-                pasos.append(">> La cámara canceló o falló.")
-                self._eliminar_uri(resolver, uri)
-                aviso("Diagnóstico de la cámara", "\n".join(pasos))
-                return
             if uri is None:
                 pasos.append(">> No hay destino para la foto.")
                 aviso("Diagnóstico de la cámara", "\n".join(pasos))
                 return
-
-            File = autoclass("java.io.File")
-            FileOutputStream = autoclass("java.io.FileOutputStream")
-            FileUtils = autoclass("android.os.FileUtils")
-            destino = Path(App.get_running_app().user_data_dir) / "captura_omr.jpg"
-            istream = resolver.openInputStream(uri)
-            if istream is None:
-                pasos.append(">> No se pudo abrir la foto guardada.")
-                self._eliminar_uri(resolver, uri)
-                aviso("Diagnóstico de la cámara", "\n".join(pasos))
-                return
-            ostream = FileOutputStream(File(str(destino)))
-            copiados = FileUtils.copy(istream, ostream)
-            try:
-                istream.close()
-                ostream.close()
-            except Exception:
-                pass
-            pasos.append("Bytes copiados: %s" % copiados)
-            self._eliminar_uri(resolver, uri)  # no deja rastro en la galería
-
-            if not destino.exists() or destino.stat().st_size == 0:
-                pasos.append(">> La copia de la foto quedó vacía.")
-                aviso("Diagnóstico de la cámara", "\n".join(pasos))
-                return
-
-            import cv2
-            img = cv2.imread(str(destino))
-            try:
-                destino.unlink()
-            except Exception:
-                pass
-            pasos.append("OpenCV leyó la imagen: %s" % ("sí" if img is not None else "NO"))
-            if img is not None:
-                pasos.append("Dimensiones: %dx%d" % (img.shape[1], img.shape[0]))
+            img, copiados = self._leer_uri_imagen(uri)
+            pasos.append("Bytes recibidos de la cámara: %s" % copiados)
+            self._eliminar_uri(resolver, uri)
             if img is None:
-                pasos.append(">> OpenCV no pudo leer la foto.")
+                pasos.append(">> La cámara no dejó una foto utilizable.")
+                pasos.append("Solución: usa el botón 'Cargar foto(s) y calificar'. "
+                             "Toma la foto con tu cámara normal y luego selecciónala.")
                 aviso("Diagnóstico de la cámara", "\n".join(pasos))
                 return
+            pasos.append("OpenCV leyó la imagen: sí (%dx%d)"
+                         % (img.shape[1], img.shape[0]))
         except Exception as e:
             import traceback
             pasos.append(">> ERROR: %s" % e)
             pasos.append(traceback.format_exc())
             aviso("Diagnóstico de la cámara", "\n".join(pasos))
+            return
+        self._calificar_imagen(img)
+
+    # --- Vía alterna: elegir una foto ya tomada desde la galería (muy confiable) ---
+    _COD_GALERIA = 0xDA7A
+
+    def _cargar_galeria_android(self):
+        try:
+            from jnius import autoclass  # type: ignore
+            from android import activity  # type: ignore
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            ctx = PythonActivity.mActivity
+            Intent = autoclass("android.content.Intent")
+            intent = Intent(Intent.ACTION_GET_CONTENT)
+            intent.setType("image/*")
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            activity.bind(on_activity_result=self._on_galeria_result)
+            ctx.startActivityForResult(
+                Intent.createChooser(intent, "Elige la foto de la hoja"),
+                self._COD_GALERIA)
+        except Exception as e:
+            aviso("Cargar foto", "No se pudo abrir la galería: %s" % e)
+
+    def _on_galeria_result(self, request, result, intent):
+        if request != self._COD_GALERIA:
+            return
+        try:
+            from android import activity  # type: ignore
+            activity.unbind(on_activity_result=self._on_galeria_result)
+        except Exception:
+            pass
+        if result not in (-1,) or intent is None:
+            return
+        try:
+            uri = intent.getData()
+        except Exception:
+            uri = None
+        if uri is None:
+            return
+        Clock.schedule_once(lambda dt: self._procesar_galeria(uri), 0.1)
+
+    def _procesar_galeria(self, uri):
+        try:
+            img, copiados = self._leer_uri_imagen(uri)
+        except Exception as e:
+            import traceback
+            aviso("Cargar foto", "ERROR: %s\n\n%s" % (e, traceback.format_exc()))
+            return
+        if img is None:
+            aviso("Cargar foto",
+                  "No se pudo leer la imagen seleccionada (bytes: %s)." % copiados)
             return
         self._calificar_imagen(img)
 
