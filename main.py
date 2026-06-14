@@ -192,9 +192,6 @@ class BotonMenu(Button):
         self.valign = "middle"
         self.bind(pos=self._redibujar, size=self._redibujar)
 
-    def on_press(self):
-        _vibrar()
-
     def _redibujar(self, *_):
         self.text_size = (self.width - dp(58), self.height)
         self.padding = [dp(50), 0, dp(10), 0]
@@ -256,12 +253,10 @@ class BotonSalir(Button):
 
     def __init__(self, **kw):
         super().__init__(**kw)
+        self.no_vibra = True  # los botones de cerrar/salir no vibran
         self.halign = "center"
         self.valign = "middle"
         self.bind(pos=self._redibujar, size=self._redibujar)
-
-    def on_press(self):
-        _vibrar()
 
     def _redibujar(self, *_):
         self.text_size = (self.width, self.height)
@@ -313,12 +308,13 @@ _TEMA_KV = """
     background_color: 0, 0, 0, 0
     color: C_BLANCO
     font_size: '15sp'
+    on_press: app.tap_pulsar(self)
     canvas.before:
         Color:
             rgba: C_AZUL if self.state == 'normal' else C_AZUL_OSC
         RoundedRectangle:
-            pos: self.pos
-            size: self.size
+            pos: (self.x + self.width * 0.03, self.y + self.height * 0.03) if self.state == 'down' else self.pos
+            size: (self.width * 0.94, self.height * 0.94) if self.state == 'down' else self.size
             radius: [10,]
 
 <BotonAccion@Button>:
@@ -328,8 +324,8 @@ _TEMA_KV = """
         Color:
             rgba: C_DORADO if self.state == 'normal' else C_DORADO_OSC
         RoundedRectangle:
-            pos: self.pos
-            size: self.size
+            pos: (self.x + self.width * 0.03, self.y + self.height * 0.03) if self.state == 'down' else self.pos
+            size: (self.width * 0.94, self.height * 0.94) if self.state == 'down' else self.size
             radius: [10,]
 
 <BotonPeligro@Button>:
@@ -338,8 +334,8 @@ _TEMA_KV = """
         Color:
             rgba: C_ROJO if self.state == 'normal' else C_ROJO_OSC
         RoundedRectangle:
-            pos: self.pos
-            size: self.size
+            pos: (self.x + self.width * 0.03, self.y + self.height * 0.03) if self.state == 'down' else self.pos
+            size: (self.width * 0.94, self.height * 0.94) if self.state == 'down' else self.size
             radius: [10,]
 
 <BotonOutline@Button>:
@@ -349,13 +345,13 @@ _TEMA_KV = """
         Color:
             rgba: (1, 1, 1, 1) if self.state == 'normal' else (0.98, 0.96, 0.88, 1)
         RoundedRectangle:
-            pos: self.pos
-            size: self.size
+            pos: (self.x + self.width * 0.03, self.y + self.height * 0.03) if self.state == 'down' else self.pos
+            size: (self.width * 0.94, self.height * 0.94) if self.state == 'down' else self.size
             radius: [10,]
         Color:
             rgba: C_DORADO
         Line:
-            rounded_rectangle: (self.x + 1, self.y + 1, self.width - 2, self.height - 2, 10)
+            rounded_rectangle: (self.x + self.width * 0.03 + 1, self.y + self.height * 0.03 + 1, self.width * 0.94 - 2, self.height * 0.94 - 2, 10) if self.state == 'down' else (self.x + 1, self.y + 1, self.width - 2, self.height - 2, 10)
             width: 1.4
 
 <BotonSalir>:
@@ -365,13 +361,13 @@ _TEMA_KV = """
         Color:
             rgba: (1, 1, 1, 1) if self.state == 'normal' else (0.95, 0.96, 0.98, 1)
         RoundedRectangle:
-            pos: self.pos
-            size: self.size
+            pos: (self.x + self.width * 0.03, self.y + self.height * 0.03) if self.state == 'down' else self.pos
+            size: (self.width * 0.94, self.height * 0.94) if self.state == 'down' else self.size
             radius: [10,]
         Color:
             rgba: C_BORDE
         Line:
-            rounded_rectangle: (self.x + 1, self.y + 1, self.width - 2, self.height - 2, 10)
+            rounded_rectangle: (self.x + self.width * 0.03 + 1, self.y + self.height * 0.03 + 1, self.width * 0.94 - 2, self.height * 0.94 - 2, 10) if self.state == 'down' else (self.x + 1, self.y + 1, self.width - 2, self.height - 2, 10)
             width: 1.2
 
 <Spinner>:
@@ -431,17 +427,48 @@ def _subdirs(p):
 
 
 def aviso(titulo, mensaje):
-    cont = BoxLayout(orientation="vertical", padding=dp(10), spacing=dp(8))
+    raiz = FloatLayout()
+    cont = BoxLayout(orientation="vertical",
+                     padding=[dp(10), dp(40), dp(10), dp(10)], spacing=dp(8))
     lbl = Label(text=str(mensaje), halign="center", valign="top", size_hint_y=None)
     lbl.bind(width=lambda i, w: setattr(i, "text_size", (w, None)))
     lbl.bind(texture_size=lambda i, ts: setattr(i, "height", ts[1]))
     scroll = ScrollView()
     scroll.add_widget(lbl)
     cont.add_widget(scroll)
-    btn = Button(text="Cerrar", size_hint_y=None, height=dp(46))
-    cont.add_widget(btn)
-    popup = Popup(title=titulo, content=cont, size_hint=(0.9, 0.6))
+    raiz.add_widget(cont)
+    btn = Factory.BotonPeligro(text="\u2715", size_hint=(None, None),
+                               size=(dp(34), dp(34)), pos_hint={"right": 1, "top": 1})
+    btn.no_vibra = True
+    raiz.add_widget(btn)
+    popup = Popup(title=titulo, content=raiz, size_hint=(0.9, 0.6))
     btn.bind(on_release=popup.dismiss)
+    popup.open()
+
+
+def confirmar(titulo, mensaje, on_si):
+    """Muestra '¿estás seguro?' con Sí / No. Llama on_si() solo si pulsa Sí."""
+    cont = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(12))
+    lbl = Label(text=str(mensaje), halign="center", valign="middle")
+    lbl.bind(width=lambda i, w: setattr(i, "text_size", (w, None)))
+    cont.add_widget(lbl)
+    fila = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(10))
+    btn_no = BotonSalir(text="No")
+    btn_si = Factory.BotonPeligro(text="S\u00ed, continuar")
+    fila.add_widget(btn_no)
+    fila.add_widget(btn_si)
+    cont.add_widget(fila)
+    popup = Popup(title=titulo, content=cont, size_hint=(0.85, 0.4),
+                  auto_dismiss=False)
+    btn_no.bind(on_release=popup.dismiss)
+
+    def _si(*_):
+        popup.dismiss()
+        try:
+            on_si()
+        except Exception as e:
+            aviso("Error", str(e))
+    btn_si.bind(on_release=_si)
     popup.open()
 
 
@@ -509,55 +536,195 @@ def _openpyxl_disponible():
         return False
 
 
-def importar_planilla(ruta_archivo):
-    """
-    Lee los nombres de los estudiantes desde un archivo .xlsx o .csv.
-    - Si hay una columna con encabezado que contenga 'nombre', usa esa.
-    - Si no, usa la columna con más texto (nombres).
-    Devuelve una lista de nombres (en orden de aparición).
-    """
-    ruta = Path(ruta_archivo)
-    ext = ruta.suffix.lower()
-    filas = []
-    if ext in (".xlsx", ".xlsm"):
-        from openpyxl import load_workbook
-        ws = load_workbook(ruta, data_only=True).active
-        filas = [list(r) for r in ws.iter_rows(values_only=True)]
-    elif ext == ".csv":
-        import csv as _csv
-        with open(ruta, newline="", encoding="utf-8-sig") as f:
-            filas = [row for row in _csv.reader(f)]
-    else:
-        return []
-
+def _nombres_de_filas(filas):
+    """Extrae nombres de una hoja (lista de filas). Tolera filas de
+    instrucciones arriba: busca el encabezado que contenga 'nombre'."""
     filas = [f for f in filas if f and any(c not in (None, "") for c in f)]
     if not filas:
         return []
-
-    # Buscar columna por encabezado "nombre"
-    encabezado = [str(c).strip().lower() if c is not None else "" for c in filas[0]]
-    col = next((i for i, h in enumerate(encabezado) if "nombre" in h), None)
-    inicio = 1 if col is not None else 0
-
+    col = None
+    inicio = 0
+    for i, fila in enumerate(filas[:15]):
+        for j, c in enumerate(fila):
+            if c is not None and "nombre" in str(c).strip().lower():
+                col, inicio = j, i + 1
+                break
+        if col is not None:
+            break
     if col is None:
-        # Sin encabezado claro: columna con más texto no numérico
         ncols = max(len(f) for f in filas)
         mejor, mejor_count = 0, -1
         for i in range(ncols):
-            count = sum(1 for f in filas
-                        if i < len(f) and isinstance(f[i], str)
-                        and f[i].strip() and not f[i].strip().isdigit())
+            count = 0
+            for f in filas:
+                if i < len(f) and isinstance(f[i], str):
+                    v = f[i].strip()
+                    if v and not v.isdigit() and len(v) <= 60 and "\n" not in v:
+                        count += 1
             if count > mejor_count:
                 mejor, mejor_count = i, count
-        col = mejor
-
+        col, inicio = mejor, 0
     nombres = []
     for f in filas[inicio:]:
         if col < len(f) and f[col] is not None:
             v = str(f[col]).strip()
-            if v and v.lower() != "nombre":
+            if (v and v.lower() != "nombre"
+                    and not v.lower().startswith("nombre")
+                    and len(v) <= 60 and "\n" not in v):
                 nombres.append(v)
     return nombres
+
+
+def importar_planilla(ruta_archivo):
+    """
+    Lee los nombres de los estudiantes desde un .xlsx o .csv.
+    Revisa todas las hojas y se queda con la que tenga más nombres.
+    Tolera instrucciones arriba (busca el encabezado 'Nombre').
+    """
+    ruta = Path(ruta_archivo)
+    ext = ruta.suffix.lower()
+    hojas = []
+    if ext in (".xlsx", ".xlsm"):
+        from openpyxl import load_workbook
+        wb = load_workbook(ruta, data_only=True)
+        for ws in wb.worksheets:
+            hojas.append([list(r) for r in ws.iter_rows(values_only=True)])
+    elif ext == ".csv":
+        import csv as _csv
+        with open(ruta, newline="", encoding="utf-8-sig") as f:
+            hojas.append([row for row in _csv.reader(f)])
+    else:
+        return []
+
+    mejor = []
+    for filas in hojas:
+        nombres = _nombres_de_filas(filas)
+        if len(nombres) > len(mejor):
+            mejor = nombres
+    return mejor
+
+
+def generar_plantilla_estudiantes(ruta_curso):
+    """Crea un Excel-plantilla para que el profesor llene N° de lista + nombres
+    (formato tradicional Apellidos Nombres) y luego lo importe."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    carpeta = ruta_curso / "estudiantes"
+    carpeta.mkdir(parents=True, exist_ok=True)
+    archivo = carpeta / "plantilla_estudiantes.xlsx"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Estudiantes"
+    azul = PatternFill("solid", start_color="1F3864")
+    blanco = Font(bold=True, color="FFFFFF", size=12)
+    centro = Alignment(horizontal="center", vertical="center")
+    ws.cell(row=1, column=1, value="N\u00b0 Lista")
+    ws.cell(row=1, column=2, value="Nombre completo (Apellidos Nombres)")
+    for c in (1, 2):
+        cell = ws.cell(row=1, column=c)
+        cell.fill = azul
+        cell.font = blanco
+        cell.alignment = centro
+    for i in range(1, 41):
+        ws.cell(row=i + 1, column=1, value=i).alignment = centro
+    ws.column_dimensions["A"].width = 10
+    ws.column_dimensions["B"].width = 46
+    ws.freeze_panes = "A2"
+
+    # Hoja con instrucciones claras
+    ins = wb.create_sheet("LÉEME (instrucciones)")
+    guia = [
+        "CÓMO LLENAR LA PLANILLA DE ESTUDIANTES",
+        "",
+        "1) Ve a la hoja 'Estudiantes' (pestaña de abajo).",
+        "2) Escribe un estudiante por fila en la columna 'Nombre completo'.",
+        "3) Usa el formato tradicional: primero APELLIDOS y luego NOMBRES.",
+        "      Ejemplo:  Pérez Gómez Juan Carlos",
+        "4) El N° de Lista ya viene numerado por orden; puedes agregar más filas.",
+        "5) El CÓDIGO de cada alumno (001, 002, 003, ...) lo genera la app sola,",
+        "      según el orden de la lista. No tienes que escribirlo.",
+        "6) Guarda este archivo (Excel) y vuelve a la app:",
+        "      Estudiantes  ->  'Importar planilla'  ->  elige este archivo.",
+        "7) La app mostrará cada nombre con su código, para que se los des a los alumnos.",
+    ]
+    for i, linea in enumerate(guia, start=1):
+        celda = ins.cell(row=i, column=1, value=linea)
+        if i == 1:
+            celda.font = Font(bold=True, size=13)
+    ins.column_dimensions["A"].width = 80
+
+    wb.save(archivo)
+    return archivo
+
+
+def abrir_archivo_excel(ruta):
+    """Abre/guarda un Excel de forma multiplataforma. En Android lo copia a
+    Descargas (visible) y lo abre con una app de hojas de cálculo."""
+    if platform == "android":
+        _abrir_excel_android(str(ruta))
+        return
+    try:
+        os.startfile(ruta)  # Windows
+    except Exception:
+        try:
+            import subprocess
+            subprocess.Popen(["xdg-open", str(ruta)])  # Linux/Mac
+        except Exception as e:
+            aviso("No se pudo abrir", "Abre el archivo manualmente:\n%s\n\n(%s)"
+                  % (ruta, e))
+
+
+def _abrir_excel_android(ruta):
+    """Copia la planilla a Descargas (visible) y la abre con Excel/Sheets."""
+    nombre = Path(ruta).name
+    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        activity = PythonActivity.mActivity
+        VERSION = autoclass("android.os.Build$VERSION")
+        with open(ruta, "rb") as f:
+            contenido = f.read()
+        if VERSION.SDK_INT >= 29:
+            ContentValues = autoclass("android.content.ContentValues")
+            MediaColumns = autoclass("android.provider.MediaStore$MediaColumns")
+            Downloads = autoclass("android.provider.MediaStore$Downloads")
+            resolver = activity.getContentResolver()
+            values = ContentValues()
+            values.put(MediaColumns.DISPLAY_NAME, nombre)
+            values.put(MediaColumns.MIME_TYPE, mime)
+            values.put(MediaColumns.RELATIVE_PATH, "Download")
+            uri = resolver.insert(Downloads.EXTERNAL_CONTENT_URI, values)
+            if uri is None:
+                raise RuntimeError("No se pudo crear el archivo en Descargas.")
+            ostream = resolver.openOutputStream(uri)
+            ostream.write(contenido)
+            ostream.flush()
+            ostream.close()
+            try:
+                Intent = autoclass("android.content.Intent")
+                intent = Intent(Intent.ACTION_VIEW)
+                intent.setDataAndType(uri, mime)
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                activity.startActivity(intent)
+            except Exception:
+                aviso("Archivo listo",
+                      "Se guard\u00f3 en Descargas:\n%s\n\n"
+                      "\u00c1brelo con Excel o Google Sheets." % nombre)
+        else:
+            Environment = autoclass("android.os.Environment")
+            carpeta = Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DOWNLOADS).getAbsolutePath()
+            destino = Path(carpeta) / nombre
+            with open(destino, "wb") as g:
+                g.write(contenido)
+            aviso("Archivo listo",
+                  "Se guard\u00f3 en Descargas:\n%s\n\n"
+                  "\u00c1brelo con Excel o Google Sheets." % nombre)
+    except Exception as e:
+        aviso("No se pudo abrir", "El archivo est\u00e1 en:\n%s\n\n(%s)" % (ruta, e))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -809,7 +976,6 @@ class HomeScreen(Screen):
         b.add_widget(Widget())  # espacio flexible: empuja el botón principal abajo
 
         btn_cal = Factory.BotonAccion(text="Calificar", size_hint_y=None, height=dp(54))
-        btn_cal.bind(on_press=lambda *_: _vibrar())
         btn_cal.bind(on_release=lambda *_: self._entrar())
         b.add_widget(btn_cal)
 
@@ -1225,7 +1391,6 @@ class CalificarScreen(Screen):
         b.add_widget(btn)
 
         btn_cam = Button(text="Tomar foto con la cámara", size_hint_y=None, height=dp(48))
-        btn_cam.bind(on_press=lambda *_: _vibrar())
         btn_cam.bind(on_release=self._tomar_foto)
         b.add_widget(btn_cam)
 
@@ -1237,6 +1402,7 @@ class CalificarScreen(Screen):
             for r in self.resultados:
                 fila_r = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(6))
                 codigo = r.get("codigo", "???")
+                etiqueta = r.get("nombre") or codigo
                 dudoso = ("?" in codigo) or codigo in ("", "???", "ERROR")
                 if codigo == "ERROR":
                     texto = f"[color={ROJO}]{r['archivo']}: error al leer[/color]"
@@ -1244,11 +1410,11 @@ class CalificarScreen(Screen):
                     n = nota_local(r["aciertos"], r["total"])
                     col = VERDE if n >= 6.0 else ROJO
                     estado = "APROB\u00d3" if n >= 6.0 else "REPROB\u00d3"
-                    texto = (f"[b]{codigo}[/b]   \u00b7   {r['aciertos']}/{r['total']}"
+                    texto = (f"[b]{etiqueta}[/b]   \u00b7   {r['aciertos']}/{r['total']}"
                              f"   \u00b7   nota [color={col}][b]{n:.1f}[/b][/color]"
                              f"   \u00b7   [color={col}]{estado}[/color]")
                 if dudoso:
-                    texto = f"[color={AMBAR}]{codigo}   \u00b7   revisar c\u00f3digo[/color]"
+                    texto = f"[color={AMBAR}]{etiqueta}   \u00b7   revisar c\u00f3digo[/color]"
                 fila_r.add_widget(Label(text=texto, markup=True))
                 btn_e = Button(text="Corregir código", size_hint_x=None, width=dp(140))
                 btn_e.bind(on_release=lambda inst, rr=r: self._editar_codigo(rr))
@@ -1727,16 +1893,31 @@ class CalificarScreen(Screen):
             return
 
         self.examen = datos.nombre
+        nombre = self._nombre_de_codigo(res.codigo_estudiante)
         archivo = f"camara_{res.codigo_estudiante}"
         self._registrar_nota_camara(archivo, res.codigo_estudiante,
-                                    aciertos, datos.total_preguntas)
+                                    aciertos, datos.total_preguntas, nombre)
         self.resultados.append({"archivo": archivo, "codigo": res.codigo_estudiante,
-                                "aciertos": aciertos, "total": datos.total_preguntas})
+                                "aciertos": aciertos, "total": datos.total_preguntas,
+                                "nombre": nombre})
         self.construir()
         self._popup_resultado(anotada, res.codigo_estudiante, aciertos,
-                              datos.total_preguntas)
+                              datos.total_preguntas, nombre)
 
-    def _registrar_nota_camara(self, archivo, codigo, aciertos, total):
+    def _nombre_de_codigo(self, codigo):
+        """Busca el nombre del estudiante en la lista, a partir del código leído."""
+        try:
+            import registro_notas as RN
+            app = App.get_running_app()
+            cod = "".join(c for c in str(codigo) if c.isdigit()).zfill(3)
+            for est in RN.cargar_roster(app.ruta_curso):
+                if est.get("codigo") == cod:
+                    return est.get("nombre", "")
+        except Exception:
+            pass
+        return ""
+
+    def _registrar_nota_camara(self, archivo, codigo, aciertos, total, nombre=""):
         app = App.get_running_app()
         dir_salida = app.ruta_curso / "resultados"
         dir_salida.mkdir(parents=True, exist_ok=True)
@@ -1749,7 +1930,7 @@ class CalificarScreen(Screen):
             except Exception:
                 pass
         registros[archivo] = {"archivo": archivo, "codigo": codigo,
-                              "aciertos": aciertos, "total": total}
+                              "aciertos": aciertos, "total": total, "nombre": nombre}
         notas_path.write_text(
             json.dumps(list(registros.values()), indent=2, ensure_ascii=False),
             encoding="utf-8")
@@ -1764,7 +1945,7 @@ class CalificarScreen(Screen):
         tex.blit_buffer(rgb.tobytes(), colorfmt="rgb", bufferfmt="ubyte")
         return tex
 
-    def _popup_resultado(self, anotada, codigo, aciertos, total):
+    def _popup_resultado(self, anotada, codigo, aciertos, total, nombre=""):
         cont = FloatLayout()
         img_w = Image(texture=self._np_a_textura(anotada),
                       allow_stretch=True, keep_ratio=True,
@@ -1774,7 +1955,11 @@ class CalificarScreen(Screen):
                                      size=(dp(42), dp(42)),
                                      pos_hint={"right": 1, "top": 1})
         cont.add_widget(btn_x)
-        pop = Popup(title=f"{codigo}  \u00b7  {aciertos}/{total}",
+        if nombre:
+            titulo = f"{nombre}  \u00b7  {aciertos}/{total}"
+        else:
+            titulo = f"C\u00f3digo {codigo} (sin nombre en lista)  \u00b7  {aciertos}/{total}"
+        pop = Popup(title=titulo,
                     content=cont, size_hint=(0.96, 0.92))
         btn_x.bind(on_release=lambda *_: pop.dismiss())
         pop.open()
@@ -1856,10 +2041,7 @@ class RegistroScreen(Screen):
         self.construir()
 
     def _abrir(self, ruta):
-        try:
-            os.startfile(ruta)  # Windows
-        except Exception as e:
-            aviso("No se pudo abrir", f"Abre el archivo manualmente:\n{ruta}\n\n({e})")
+        abrir_archivo_excel(ruta)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1870,6 +2052,12 @@ class CalificadorApp(App):
     grado = ""
     curso = ""
     ruta_curso = None
+
+    def tap_pulsar(self, widget):
+        """Vibración corta al pulsar cualquier botón, salvo los de cerrar/salir."""
+        if getattr(widget, "no_vibra", False):
+            return
+        _vibrar()
 
     def build(self):
         self.title = "CalificadorApp"
