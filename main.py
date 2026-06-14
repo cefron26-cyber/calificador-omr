@@ -1489,40 +1489,68 @@ class CalificarScreen(Screen):
             activity.unbind(on_activity_result=self._on_cam_result)
         except Exception:
             pass
-        # RESULT_OK vale -1 en Android; si el usuario cancela, no hacemos nada.
-        if result != -1:
-            return
         destino = getattr(self, "_destino_foto", None)
-        ruta = str(destino) if destino else ""
         # Procesamos en el hilo principal de Kivy (UI segura) tras un instante,
         # dándole tiempo a la cámara de terminar de escribir el archivo.
-        Clock.schedule_once(lambda dt: self._foto_lista(ruta), 0.3)
+        Clock.schedule_once(
+            lambda dt: self._procesar_captura(result, destino), 0.4)
 
     def _foto_lista(self, ruta_foto):
-        """Callback de plyer: recibe la ruta de la foto, la procesa en RAM y la borra."""
+        """Callback de plyer (iOS): delega en el procesador con diagnóstico."""
         p = Path(str(ruta_foto)) if ruta_foto else None
-        if not p or not p.exists():
-            aviso("Cámara", "No se recibió la foto.")
-            return
-        import cv2
-        import lector_omr as L
-        img = cv2.imread(str(p))          # se carga a memoria (RAM)
+        self._procesar_captura(-1, p)
+
+    def _procesar_captura(self, result, destino):
+        """Procesa la foto tomada, reportando cada paso para diagnóstico.
+        Si algo falla, muestra exactamente en qué punto y por qué."""
+        pasos = []
         try:
-            p.unlink()                    # se borra enseguida: no deja basura ni toca la galería
-        except Exception:
-            pass
-        if img is None:
-            aviso("Cámara", "La foto no se pudo leer.")
-            return
-        try:
+            pasos.append("Código de resultado: %s  (OK = -1)" % result)
+            ruta = str(destino) if destino else ""
+            pasos.append("Ruta de la foto: %s" % (ruta or "(vacía)"))
+            p = Path(ruta) if ruta else None
+            existe = bool(p and p.exists())
+            pasos.append("¿El archivo existe?: %s" % ("sí" if existe else "NO"))
+            tam = p.stat().st_size if existe else 0
+            if existe:
+                pasos.append("Tamaño del archivo: %d bytes" % tam)
+
+            if result not in (-1, None):
+                pasos.append(">> La cámara no devolvió OK (cancelado o error).")
+                aviso("Diagnóstico de la cámara", "\n".join(pasos))
+                return
+            if not existe or tam == 0:
+                pasos.append(">> No se encontró la foto guardada (o está vacía).")
+                aviso("Diagnóstico de la cámara", "\n".join(pasos))
+                return
+
+            import cv2
+            import lector_omr as L
+            img = cv2.imread(str(p))
+            pasos.append("OpenCV leyó la imagen: %s" % ("sí" if img is not None else "NO"))
+            if img is not None:
+                pasos.append("Dimensiones: %dx%d" % (img.shape[1], img.shape[0]))
+            try:
+                p.unlink()
+            except Exception:
+                pass
+            if img is None:
+                pasos.append(">> OpenCV no pudo leer la foto.")
+                aviso("Diagnóstico de la cámara", "\n".join(pasos))
+                return
+
             clave_json = self._mapa_claves[self.sp_examen.text]
             datos = L.cargar_datos_examen(clave_json)
+            pasos.append("Examen: %s · %d preguntas" % (datos.nombre, datos.total_preguntas))
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             marcas = L.detectar_marcas(gray)
+            pasos.append("Marcas de esquina detectadas: %s"
+                         % ("sí" if marcas is not None else "NO"))
             if marcas is None:
                 aviso("No se detectó la hoja",
-                      "No se vieron las 4 marcas de esquina.\n"
-                      "Repite la foto con buena luz y la hoja completa.")
+                      "No se vieron las 4 marcas de esquina. Repite la foto con "
+                      "buena luz, la hoja completa, plana y sin sombras.\n\n"
+                      "— Diagnóstico —\n" + "\n".join(pasos))
                 return
             recta, scale = L.corregir_perspectiva(img, marcas)
             res = L.leer_respuestas(recta, datos.total_preguntas, scale)
@@ -1530,7 +1558,10 @@ class CalificarScreen(Screen):
             aciertos = sum(1 for q, r in res.respuestas.items()
                            if r == datos.clave.get(q))
         except Exception as e:
-            aviso("Error al procesar", str(e))
+            import traceback
+            pasos.append(">> ERROR: %s" % e)
+            pasos.append(traceback.format_exc())
+            aviso("Diagnóstico de la cámara", "\n".join(pasos))
             return
 
         self.examen = datos.nombre
