@@ -57,6 +57,7 @@ class _PDF:
         self.W = ancho
         self.H = alto
         self._ops = []  # lista de bytes (operadores del contenido)
+        self._img = None  # imagen opcional (logo)
 
     # -- operadores de dibujo (coordenadas con origen abajo-izquierda) --
     def color_relleno(self, r, g, b):
@@ -100,18 +101,46 @@ class _PDF:
     def texto_centrado(self, x, y, s, size, bold=False, color=(0, 0, 0)):
         self.texto(x - _ancho_texto(s, size) / 2.0, y, s, size, bold, color)
 
+    def imagen(self, ruta, x, y, w, h):
+        """Incrusta una imagen (PNG/JPG) en (x,y) con tamaño w×h usando PIL.
+        Devuelve True si lo logró; False si PIL no está o falla."""
+        try:
+            from PIL import Image
+            import zlib
+            im = Image.open(ruta).convert("RGB")
+            maxpx = 500  # reducir para no inflar el PDF
+            if max(im.size) > maxpx:
+                f = maxpx / float(max(im.size))
+                im = im.resize((max(1, int(im.width * f)), max(1, int(im.height * f))))
+            datos = zlib.compress(im.tobytes())
+            self._img = {"w": im.width, "h": im.height, "data": datos}
+            self._ops.append(b"q %.2f 0 0 %.2f %.2f %.2f cm /ImLogo Do Q\n"
+                             % (w, h, x, y))
+            return True
+        except Exception:
+            return False
+
     def to_bytes(self):
         contenido = b"".join(self._ops)
+        tiene_img = self._img is not None
+        xobj = b" /XObject << /ImLogo 7 0 R >>" if tiene_img else b""
         objetos = [
             b"<< /Type /Catalog /Pages 2 0 R >>",
             b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
             (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.0f %.0f] "
-             b"/Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> "
-             b"/Contents 6 0 R >>" % (self.W, self.H)),
+             b"/Resources << /Font << /F1 4 0 R /F2 5 0 R >>%b >> "
+             b"/Contents 6 0 R >>" % (self.W, self.H, xobj)),
             b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
             b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
             b"<< /Length %d >>\nstream\n%b\nendstream" % (len(contenido), contenido),
         ]
+        if tiene_img:
+            im = self._img
+            objetos.append(
+                b"<< /Type /XObject /Subtype /Image /Width %d /Height %d "
+                b"/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode "
+                b"/Length %d >>\nstream\n" % (im["w"], im["h"], len(im["data"]))
+                + im["data"] + b"\nendstream")
         salida = bytearray(b"%PDF-1.4\n")
         offsets = []
         for i, obj in enumerate(objetos, start=1):
@@ -159,17 +188,29 @@ def generar_hoja_omr(archivo_salida, num_preguntas: int) -> None:
     pdf.texto(margen + 1.0 * CM, H - 4.8 * CM,
               "Grado y Curso: __________________   Asignatura: __________________", 11)
 
-    # 3. CASILLA DEL LOGO (marcador; no se incrustan imágenes)
+    # 3. LOGO (se incrusta si existe; si no, casilla marcador)
     logo_w = 4.0 * CM
     logo_h = 3.5 * CM
     pos_logo_x = W - margen - logo_w - 1.5 * CM
     pos_logo_y = H - 5.0 * CM
-    pdf.color_linea(0, 0, 0)
-    pdf.grosor_linea(1)
-    pdf.color_relleno(0.92, 0.92, 0.92)
-    pdf.rect_caja(pos_logo_x, pos_logo_y, logo_w, logo_h)
-    pdf.texto_centrado(pos_logo_x + logo_w / 2,
-                       pos_logo_y + logo_h / 2 - 0.1 * CM, "[ LOGO ]", 10, bold=True)
+    ruta_logo = None
+    for _r in _RUTAS_LOGO:
+        if _r.exists():
+            ruta_logo = _r
+            break
+    colocado = False
+    if ruta_logo is not None:
+        lado = min(logo_w, logo_h)  # el logo es cuadrado: se centra sin deformar
+        lx = pos_logo_x + (logo_w - lado) / 2.0
+        ly = pos_logo_y + (logo_h - lado) / 2.0
+        colocado = pdf.imagen(str(ruta_logo), lx, ly, lado, lado)
+    if not colocado:
+        pdf.color_linea(0, 0, 0)
+        pdf.grosor_linea(1)
+        pdf.color_relleno(0.92, 0.92, 0.92)
+        pdf.rect_caja(pos_logo_x, pos_logo_y, logo_w, logo_h)
+        pdf.texto_centrado(pos_logo_x + logo_w / 2,
+                           pos_logo_y + logo_h / 2 - 0.1 * CM, "[ LOGO ]", 10, bold=True)
 
     # 4. INSTRUCCIONES DE MARCADO
     y_instrucciones = H - 6.2 * CM
