@@ -2265,8 +2265,11 @@ class CalificarScreen(Screen):
         self.examen = datos.nombre
         nombre = self._nombre_de_codigo(res.codigo_estudiante)
         archivo = f"camara_{res.codigo_estudiante}"
+        respuestas = {str(q): res.respuestas.get(q, "")
+                      for q in range(1, datos.total_preguntas + 1)}
         existia = self._registrar_nota_camara(archivo, res.codigo_estudiante,
-                                              aciertos, datos.total_preguntas, nombre)
+                                              aciertos, datos.total_preguntas,
+                                              nombre, respuestas)
         self.resultados.append({"archivo": archivo, "codigo": res.codigo_estudiante,
                                 "aciertos": aciertos, "total": datos.total_preguntas,
                                 "nombre": nombre})
@@ -2377,7 +2380,8 @@ class CalificarScreen(Screen):
             pass
         return ""
 
-    def _registrar_nota_camara(self, archivo, codigo, aciertos, total, nombre=""):
+    def _registrar_nota_camara(self, archivo, codigo, aciertos, total,
+                               nombre="", respuestas=None):
         app = App.get_running_app()
         dir_salida = app.ruta_curso / "resultados"
         dir_salida.mkdir(parents=True, exist_ok=True)
@@ -2391,7 +2395,8 @@ class CalificarScreen(Screen):
                 pass
         existia = archivo in registros
         registros[archivo] = {"archivo": archivo, "codigo": codigo,
-                              "aciertos": aciertos, "total": total, "nombre": nombre}
+                              "aciertos": aciertos, "total": total,
+                              "nombre": nombre, "respuestas": respuestas or {}}
         notas_path.write_text(
             json.dumps(list(registros.values()), indent=2, ensure_ascii=False),
             encoding="utf-8")
@@ -2476,14 +2481,42 @@ class RegistroScreen(Screen):
             btn_abrir.bind(on_release=lambda *_: self._abrir(self.ultimo_excel))
             b.add_widget(btn_abrir)
 
+        btn_rep = Factory.BotonAccion(text="Reporte del docente (estadísticas)",
+                                      size_hint_y=None, height=dp(48))
+        btn_rep.bind(on_release=self._reporte_docente)
+        b.add_widget(btn_rep)
+
         btn_coord = Factory.BotonOutline(text="Enviar planilla al coordinador",
                                          size_hint_y=None, height=dp(44))
-        btn_coord.bind(on_release=lambda *_: aviso(
-            "Enviar al coordinador", "Funci\u00f3n no disponible a\u00fan."))
+        btn_coord.bind(on_release=self._enviar_coordinador)
         b.add_widget(btn_coord)
 
         b.add_widget(Label(text="", size_hint_y=1))
         self._volver(b)
+
+    def _reporte_docente(self, *_):
+        app = App.get_running_app()
+        examen = self.sp_examen.text
+        try:
+            import reportes
+            ruta = reportes.generar_reporte_docente(app.ruta_curso, examen)
+        except Exception as e:
+            aviso("Reporte del docente", f"No se pudo generar:\n{e}")
+            return
+        abrir_archivo_excel(ruta)
+
+    def _enviar_coordinador(self, *_):
+        app = App.get_running_app()
+        examen = self.sp_examen.text
+        try:
+            import reportes
+            ruta = reportes.generar_json_salon(app.ruta_curso, examen)
+        except Exception as e:
+            aviso("Enviar al coordinador",
+                  "json generado: false\n\n%s" % e)
+            return
+        aviso("Enviar al coordinador",
+              "json generado: true\n\nArchivo:\n%s" % ruta.name)
 
     def _volver(self, b):
         btn = Button(text="← Volver al menú", size_hint_y=None, height=dp(44))
