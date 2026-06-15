@@ -1007,6 +1007,11 @@ class HomeScreen(Screen):
         btn_add.bind(on_release=lambda *_: self._popup_agregar())
         b.add_widget(btn_add)
 
+        btn_edit = Factory.BotonOutline(text="Editar / eliminar grados o cursos",
+                                        size_hint_y=None, height=dp(46))
+        btn_edit.bind(on_release=lambda *_: self._popup_editar())
+        b.add_widget(btn_edit)
+
         self._refrescar_grados()
 
     def _entrar(self):
@@ -1074,7 +1079,94 @@ class HomeScreen(Screen):
             self.construir()
 
         btn.bind(on_release=_crear)
+        Window.softinput_mode = "pan"
+        pop.bind(on_dismiss=lambda *_: setattr(Window, "softinput_mode", ""))
         pop.open()
+
+    def _popup_editar(self):
+        prof_dir = BASE / self._prof
+        grados = _subdirs(prof_dir)
+        cont = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(10))
+        cont.add_widget(Label(text="Eliminar grados o cursos", size_hint_y=None,
+                              height=dp(28), bold=True))
+        cont.add_widget(Label(
+            text="Borra lo que sobre. Pide confirmación antes de eliminar.",
+            size_hint_y=None, height=dp(22), font_size="12sp",
+            color=(0.42, 0.47, 0.55, 1)))
+        inner = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(4))
+        inner.bind(minimum_height=inner.setter("height"))
+        if not grados:
+            inner.add_widget(Label(text="No hay grados todavía.",
+                                   size_hint_y=None, height=dp(30)))
+        for grado in grados:
+            fg = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(6))
+            lg = Label(text=f"[b]Grado {grado}[/b]", markup=True,
+                       halign="left", valign="middle")
+            lg.bind(size=lambda i, *_: setattr(i, "text_size", (i.width, i.height)))
+            fg.add_widget(lg)
+            bg = Factory.BotonPeligro(text="Eliminar grado", size_hint_x=None,
+                                      width=dp(140))
+            bg.bind(on_release=lambda inst, gr=grado: self._eliminar_grado(gr))
+            fg.add_widget(bg)
+            inner.add_widget(fg)
+            for curso in _subdirs(prof_dir / grado):
+                fc = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(6))
+                lc = Label(text=f"      Curso {grado}\u00b0{curso}",
+                           halign="left", valign="middle")
+                lc.bind(size=lambda i, *_: setattr(i, "text_size", (i.width, i.height)))
+                fc.add_widget(lc)
+                bc = Factory.BotonPeligro(text="X", size_hint_x=None, width=dp(52))
+                bc.bind(on_release=lambda inst, gr=grado, cu=curso:
+                        self._eliminar_curso(gr, cu))
+                fc.add_widget(bc)
+                inner.add_widget(fc)
+        scroll = ScrollView()
+        scroll.add_widget(inner)
+        cont.add_widget(scroll)
+        btn_cerrar = BotonSalir(text="Cerrar", size_hint_y=None, height=dp(44))
+        cont.add_widget(btn_cerrar)
+        self._pop_editar = Popup(title="Editar grados/cursos", content=cont,
+                                 size_hint=(0.95, 0.85))
+        btn_cerrar.bind(on_release=self._pop_editar.dismiss)
+        self._pop_editar.open()
+
+    def _eliminar_grado(self, grado):
+        def _hacer():
+            import shutil
+            try:
+                shutil.rmtree(BASE / self._prof / grado)
+            except Exception as e:
+                aviso("Error", str(e))
+                return
+            try:
+                self._pop_editar.dismiss()
+            except Exception:
+                pass
+            self.construir()
+            aviso("Listo", f"Se eliminó el grado {grado} y todos sus cursos.")
+        confirmar("Eliminar grado",
+                  f"¿Eliminar el grado {grado} con TODOS sus cursos, estudiantes y "
+                  "notas?\nEsta acción no se puede deshacer.",
+                  _hacer, txt_si="Sí, eliminar", txt_no="Cancelar")
+
+    def _eliminar_curso(self, grado, curso):
+        def _hacer():
+            import shutil
+            try:
+                shutil.rmtree(BASE / self._prof / grado / curso)
+            except Exception as e:
+                aviso("Error", str(e))
+                return
+            try:
+                self._pop_editar.dismiss()
+            except Exception:
+                pass
+            self.construir()
+            aviso("Listo", f"Se eliminó el curso {grado}\u00b0{curso}.")
+        confirmar("Eliminar curso",
+                  f"¿Eliminar el curso {grado}\u00b0{curso} con sus estudiantes y "
+                  "notas?\nEsta acción no se puede deshacer.",
+                  _hacer, txt_si="Sí, eliminar", txt_no="Cancelar")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1464,10 +1556,22 @@ class EsamenesScreen(Screen):
             if not (1 <= cantidad <= 50):
                 lbl_msg.text = "El número de preguntas debe ir de 1 a 50."
                 return
-            pop.dismiss()
             app = App.get_running_app()
-            app.sm.get_screen("claves").preparar(nombre, cantidad)
-            app.sm.current = "claves"
+
+            def _ir():
+                pop.dismiss()
+                app.sm.get_screen("claves").preparar(nombre, cantidad)
+                app.sm.current = "claves"
+
+            existentes = [nom for _, nom, _ in listar_examenes(app.ruta_curso)]
+            if nombre in existentes:
+                confirmar(
+                    "Examen existente",
+                    f"Ya existe un examen llamado '{nombre}'.\n"
+                    "Si continúas, reemplazarás sus respuestas.",
+                    _ir, txt_si="Sí, reemplazar", txt_no="Cancelar")
+            else:
+                _ir()
 
         btn_generar.bind(on_release=_generar)
         # Solo aquí: que el teclado suba la pantalla para ver lo que se escribe.
@@ -1582,10 +1686,12 @@ class CalificarScreen(Screen):
         self.add_widget(self.cont)
         self.resultados = []
         self.examen = ""
+        self._examen_sel = ""
 
     def on_pre_enter(self, *_):
         self.resultados = []
         self.examen = ""
+        self._examen_sel = ""
         self.construir()
 
     def construir(self):
@@ -1604,7 +1710,10 @@ class CalificarScreen(Screen):
         fila = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
         fila.add_widget(Label(text="Examen:", size_hint_x=0.3))
         nombres = list(self._mapa_claves.keys())
-        self.sp_examen = Spinner(text=nombres[0], values=nombres)
+        inicial = self._examen_sel if self._examen_sel in nombres else nombres[0]
+        self._examen_sel = inicial
+        self.sp_examen = Spinner(text=inicial, values=nombres)
+        self.sp_examen.bind(text=self._cambio_examen)
         fila.add_widget(self.sp_examen)
         b.add_widget(fila)
 
@@ -1623,26 +1732,39 @@ class CalificarScreen(Screen):
             lista.add_widget(Label(text="[b]Resultados[/b]", markup=True,
                                    size_hint_y=None, height=dp(26)))
             for r in self.resultados:
-                fila_r = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(6))
                 codigo = r.get("codigo", "???")
-                etiqueta = r.get("nombre") or codigo
+                nombre = r.get("nombre", "")
                 dudoso = ("?" in codigo) or codigo in ("", "???", "ERROR")
                 if codigo == "ERROR":
-                    texto = f"[color={ROJO}]{r['archivo']}: error al leer[/color]"
+                    fila_r = BoxLayout(size_hint_y=None, height=dp(34))
+                    fila_r.add_widget(Label(
+                        text=f"[color={ROJO}]{r['archivo']}: error al leer[/color]",
+                        markup=True))
+                    lista.add_widget(fila_r)
+                    continue
+                n = nota_local(r["aciertos"], r["total"])
+                col = VERDE if n >= 6.0 else ROJO
+                if dudoso or not nombre:
+                    # Código no identificado: avisar y ofrecer corregir
+                    fila_r = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+                    etq = nombre or f"Código {codigo}"
+                    lb = Label(text=f"[color={AMBAR}]{etq}  ·  revisar código[/color]",
+                               markup=True, halign="left", valign="middle")
+                    lb.bind(size=lambda i, *_: setattr(i, "text_size", (i.width, i.height)))
+                    fila_r.add_widget(lb)
+                    btn_e = Button(text="Corregir", size_hint_x=None, width=dp(110))
+                    btn_e.bind(on_release=lambda inst, rr=r: self._editar_codigo(rr))
+                    fila_r.add_widget(btn_e)
+                    lista.add_widget(fila_r)
                 else:
-                    n = nota_local(r["aciertos"], r["total"])
-                    col = VERDE if n >= 6.0 else ROJO
-                    estado = "APROB\u00d3" if n >= 6.0 else "REPROB\u00d3"
-                    texto = (f"[b]{etiqueta}[/b]   \u00b7   {r['aciertos']}/{r['total']}"
-                             f"   \u00b7   nota [color={col}][b]{n:.1f}[/b][/color]"
-                             f"   \u00b7   [color={col}]{estado}[/color]")
-                if dudoso:
-                    texto = f"[color={AMBAR}]{etiqueta}   \u00b7   revisar c\u00f3digo[/color]"
-                fila_r.add_widget(Label(text=texto, markup=True))
-                btn_e = Button(text="Corregir código", size_hint_x=None, width=dp(140))
-                btn_e.bind(on_release=lambda inst, rr=r: self._editar_codigo(rr))
-                fila_r.add_widget(btn_e)
-                lista.add_widget(fila_r)
+                    lista_num = str(int(codigo)) if codigo.isdigit() else codigo
+                    fila_r = BoxLayout(size_hint_y=None, height=dp(34))
+                    texto = (f"[b]{lista_num}. {nombre}[/b]"
+                             f"     \u00b7     nota [color={col}][b]{n:.1f}[/b][/color]")
+                    lb = Label(text=texto, markup=True, halign="left", valign="middle")
+                    lb.bind(size=lambda i, *_: setattr(i, "text_size", (i.width, i.height)))
+                    fila_r.add_widget(lb)
+                    lista.add_widget(fila_r)
         else:
             lista.add_widget(Label(text="Elige el examen y carga las fotos.",
                                    size_hint_y=None, height=dp(28)))
@@ -1651,6 +1773,12 @@ class CalificarScreen(Screen):
         b.add_widget(scroll)
 
         self._volver(b)
+
+    def _cambio_examen(self, inst, val):
+        if val and val != self._examen_sel:
+            self._examen_sel = val
+            self.resultados = []   # los resultados eran de otro examen
+            self.construir()
 
     def _volver(self, b):
         btn = Button(text="← Volver al menú", size_hint_y=None, height=dp(44))
@@ -2112,13 +2240,21 @@ class CalificarScreen(Screen):
 
     def _procesar_una(self, img):
         """Califica UNA imagen, registra la nota y devuelve {textura, titulo}.
-        Devuelve None si no se detectó la hoja (4 marcas)."""
+        Devuelve None si no se detectó la hoja (4 marcas), probando rotaciones."""
         import cv2
         import lector_omr as L
         clave_json = self._mapa_claves[self.sp_examen.text]
         datos = L.cargar_datos_examen(clave_json)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        marcas = L.detectar_marcas(gray)
+        # Si la foto viene girada, probamos las 4 orientaciones antes de rendirnos.
+        marcas = None
+        for rot in (None, cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_180,
+                    cv2.ROTATE_90_COUNTERCLOCKWISE):
+            prueba = img if rot is None else cv2.rotate(img, rot)
+            gray = cv2.cvtColor(prueba, cv2.COLOR_BGR2GRAY)
+            marcas = L.detectar_marcas(gray)
+            if marcas is not None:
+                img = prueba
+                break
         if marcas is None:
             return None
         recta, scale = L.corregir_perspectiva(img, marcas)
@@ -2129,8 +2265,8 @@ class CalificarScreen(Screen):
         self.examen = datos.nombre
         nombre = self._nombre_de_codigo(res.codigo_estudiante)
         archivo = f"camara_{res.codigo_estudiante}"
-        self._registrar_nota_camara(archivo, res.codigo_estudiante,
-                                    aciertos, datos.total_preguntas, nombre)
+        existia = self._registrar_nota_camara(archivo, res.codigo_estudiante,
+                                              aciertos, datos.total_preguntas, nombre)
         self.resultados.append({"archivo": archivo, "codigo": res.codigo_estudiante,
                                 "aciertos": aciertos, "total": datos.total_preguntas,
                                 "nombre": nombre})
@@ -2139,6 +2275,8 @@ class CalificarScreen(Screen):
         else:
             titulo = "C\u00f3digo %s (sin nombre)  \u00b7  %d/%d" % (
                 res.codigo_estudiante, aciertos, datos.total_preguntas)
+        if existia:
+            titulo += "  \u00b7  (nota actualizada)"
         return {"textura": self._np_a_textura(anotada), "titulo": titulo}
 
     def _calificar_imagen(self, img):
@@ -2251,11 +2389,13 @@ class CalificarScreen(Screen):
                     registros[r.get("archivo", "")] = r
             except Exception:
                 pass
+        existia = archivo in registros
         registros[archivo] = {"archivo": archivo, "codigo": codigo,
                               "aciertos": aciertos, "total": total, "nombre": nombre}
         notas_path.write_text(
             json.dumps(list(registros.values()), indent=2, ensure_ascii=False),
             encoding="utf-8")
+        return existia
 
     @staticmethod
     def _np_a_textura(img_bgr):
