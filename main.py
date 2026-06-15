@@ -1074,6 +1074,15 @@ class DashboardScreen(Screen):
         app = App.get_running_app()
         b = self.contenedor
         b.clear_widgets()
+
+        # Barra superior fija: botón "Cerrar" pequeño (1/6) en la esquina sup. izq.
+        barra_sup = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        btn_salir = BotonSalir(text="Cerrar", size_hint_x=1.0 / 6.0)
+        btn_salir.bind(on_release=lambda *_: App.get_running_app().stop())
+        barra_sup.add_widget(btn_salir)
+        barra_sup.add_widget(Widget(size_hint_x=5.0 / 6.0))
+        b.add_widget(barra_sup)
+
         b.add_widget(Encabezado("Panel del curso"))
 
         # Banner persistente "Actualmente estás calificando: Grado - Curso"
@@ -1107,10 +1116,6 @@ class DashboardScreen(Screen):
         btn_cambiar = Button(text="\u2190 Cambiar curso", size_hint_y=None, height=dp(46))
         btn_cambiar.bind(on_release=lambda *_: setattr(app.sm, "current", "home"))
         b.add_widget(btn_cambiar)
-
-        btn_salir = BotonSalir(text="Cerrar", size_hint_y=None, height=dp(46))
-        btn_salir.bind(on_release=lambda *_: App.get_running_app().stop())
-        b.add_widget(btn_salir)
 
     def _ir(self, pantalla):
         app = App.get_running_app()
@@ -1252,9 +1257,7 @@ class EstudiantesScreen(Screen):
             intent.setType("*/*")
             intent.addCategory(Intent.CATEGORY_OPENABLE)
             activity.bind(on_activity_result=self._on_importar_result)
-            ctx.startActivityForResult(
-                Intent.createChooser(intent, "Elige la planilla (Excel o CSV)"),
-                self._COD_IMPORTAR)
+            ctx.startActivityForResult(intent, self._COD_IMPORTAR)
         except Exception as e:
             aviso("Importar", "No se pudo abrir el explorador: %s" % e)
 
@@ -2012,9 +2015,7 @@ class CalificarScreen(Screen):
             intent.setType("image/*")
             intent.addCategory(Intent.CATEGORY_OPENABLE)
             activity.bind(on_activity_result=self._on_galeria_result)
-            ctx.startActivityForResult(
-                Intent.createChooser(intent, "Elige la foto de la hoja"),
-                self._COD_GALERIA)
+            ctx.startActivityForResult(intent, self._COD_GALERIA)
         except Exception as e:
             aviso("Cargar foto", "No se pudo abrir la galería: %s" % e)
 
@@ -2212,6 +2213,12 @@ class RegistroScreen(Screen):
             btn_abrir.bind(on_release=lambda *_: self._abrir(self.ultimo_excel))
             b.add_widget(btn_abrir)
 
+        btn_coord = Factory.BotonOutline(text="Enviar planilla al coordinador",
+                                         size_hint_y=None, height=dp(44))
+        btn_coord.bind(on_release=lambda *_: aviso(
+            "Enviar al coordinador", "Funci\u00f3n no disponible a\u00fan."))
+        b.add_widget(btn_coord)
+
         b.add_widget(Label(text="", size_hint_y=1))
         self._volver(b)
 
@@ -2269,6 +2276,8 @@ class CalificadorApp(App):
                 pass
         _registrar_fuentes()
         Window.clearcolor = FONDO
+        # Cuando aparece el teclado, sube la pantalla para no tapar el campo activo.
+        Window.softinput_mode = "pan"
         if platform != "android":
             Window.size = (400, 720)   # vista tipo celular para probar en PC
         GS.inicializar_sistema()
