@@ -292,6 +292,8 @@ _TEMA_KV = """
 #:set C_DORADO_TXT (0.227, 0.169, 0.0, 1)
 #:set C_ROJO      (0.780, 0.160, 0.160, 1)
 #:set C_ROJO_OSC  (0.620, 0.120, 0.120, 1)
+#:set C_VERDE     (0.180, 0.490, 0.196, 1)
+#:set C_VERDE_OSC (0.130, 0.370, 0.150, 1)
 #:set C_TEXTO     (0.106, 0.129, 0.176, 1)
 #:set C_GRIS      (0.42, 0.47, 0.55, 1)
 #:set C_BORDE     (0.79, 0.83, 0.89, 1)
@@ -333,6 +335,17 @@ _TEMA_KV = """
     canvas.before:
         Color:
             rgba: C_ROJO if self.state == 'normal' else C_ROJO_OSC
+        RoundedRectangle:
+            pos: (self.x + self.width * 0.03, self.y + self.height * 0.03) if self.state == 'down' else self.pos
+            size: (self.width * 0.94, self.height * 0.94) if self.state == 'down' else self.size
+            radius: [10,]
+
+<BotonExito@Button>:
+    color: C_BLANCO
+    bold: True
+    canvas.before:
+        Color:
+            rgba: C_VERDE if self.state == 'normal' else C_VERDE_OSC
         RoundedRectangle:
             pos: (self.x + self.width * 0.03, self.y + self.height * 0.03) if self.state == 'down' else self.pos
             size: (self.width * 0.94, self.height * 0.94) if self.state == 'down' else self.size
@@ -446,15 +459,15 @@ def aviso(titulo, mensaje):
     popup.open()
 
 
-def confirmar(titulo, mensaje, on_si):
-    """Muestra '¿estás seguro?' con Sí / No. Llama on_si() solo si pulsa Sí."""
+def confirmar(titulo, mensaje, on_si, txt_si="S\u00ed, continuar", txt_no="No"):
+    """Muestra '¿estás seguro?' con dos opciones. Llama on_si() solo si confirma."""
     cont = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(12))
     lbl = Label(text=str(mensaje), halign="center", valign="middle")
     lbl.bind(width=lambda i, w: setattr(i, "text_size", (w, None)))
     cont.add_widget(lbl)
     fila = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(10))
-    btn_no = BotonSalir(text="No")
-    btn_si = Factory.BotonPeligro(text="S\u00ed, continuar")
+    btn_no = BotonSalir(text=txt_no)
+    btn_si = Factory.BotonPeligro(text=txt_si)
     fila.add_widget(btn_no)
     fila.add_widget(btn_si)
     cont.add_widget(fila)
@@ -952,12 +965,18 @@ class HomeScreen(Screen):
         b = self.contenedor
         b.add_widget(Encabezado("Calificador OMR"))
 
+        app = App.get_running_app()
         profesores = _subdirs(BASE)
+        if app.profesor and app.profesor in profesores:
+            self._prof = app.profesor
+        else:
+            self._prof = profesores[0] if profesores else ""
         b.add_widget(_caption("Profesor"))
-        self.sp_prof = Spinner(text=profesores[0] if profesores else "",
-                               values=profesores, size_hint_y=None, height=dp(46))
-        self.sp_prof.bind(text=lambda *_: self._refrescar_grados())
-        b.add_widget(self.sp_prof)
+        lbl_prof = Label(text=self._prof.replace("_", " ") or "—",
+                         size_hint_y=None, height=dp(40), bold=True,
+                         font_size="17sp", halign="left", valign="middle")
+        lbl_prof.bind(size=lambda i, *_: setattr(i, "text_size", (i.width, i.height)))
+        b.add_widget(lbl_prof)
 
         fila_gc = BoxLayout(size_hint_y=None, height=dp(70), spacing=dp(10))
         col_g = BoxLayout(orientation="vertical", spacing=dp(4))
@@ -998,14 +1017,14 @@ class HomeScreen(Screen):
         app.sm.current = "dashboard"
 
     def _refrescar_grados(self):
-        prof = self.sp_prof.text
+        prof = self._prof
         grados = _subdirs(BASE / prof) if prof else []
         self.sp_grado.values = grados
         self.sp_grado.text = grados[0] if grados else ""
         self._refrescar_cursos()
 
     def _refrescar_cursos(self):
-        prof, grado = self.sp_prof.text, self.sp_grado.text
+        prof, grado = self._prof, self.sp_grado.text
         cursos = _subdirs(BASE / prof / grado) if (prof and grado) else []
         self.sp_curso.values = cursos
         self.sp_curso.text = cursos[0] if cursos else ""
@@ -1013,7 +1032,7 @@ class HomeScreen(Screen):
 
     def _guardar_seleccion(self):
         app = App.get_running_app()
-        app.profesor = self.sp_prof.text
+        app.profesor = self._prof
         app.grado = self.sp_grado.text
         app.curso = self.sp_curso.text
         if app.profesor and app.grado and app.curso:
@@ -1046,7 +1065,7 @@ class HomeScreen(Screen):
             g = in_g.text.strip()
             if not g:
                 return
-            ruta_prof = BASE / self.sp_prof.text
+            ruta_prof = BASE / self._prof
             ruta_grado = GS.crear_grado(ruta_prof, g)
             inicio = len(_subdirs(ruta_grado))
             for i in range(int(sp.text)):
@@ -1075,12 +1094,12 @@ class DashboardScreen(Screen):
         b = self.contenedor
         b.clear_widgets()
 
-        # Barra superior fija: botón "Cerrar" pequeño (1/6) en la esquina sup. izq.
-        barra_sup = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
-        btn_salir = BotonSalir(text="Cerrar", size_hint_x=1.0 / 6.0)
+        # Barra superior fija: botón "Cerrar" a la derecha, legible.
+        barra_sup = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))
+        barra_sup.add_widget(Widget(size_hint_x=0.6))
+        btn_salir = BotonSalir(text="Cerrar", size_hint_x=0.4)
         btn_salir.bind(on_release=lambda *_: App.get_running_app().stop())
         barra_sup.add_widget(btn_salir)
-        barra_sup.add_widget(Widget(size_hint_x=5.0 / 6.0))
         b.add_widget(barra_sup)
 
         b.add_widget(Encabezado("Panel del curso"))
@@ -1451,6 +1470,9 @@ class EsamenesScreen(Screen):
             app.sm.current = "claves"
 
         btn_generar.bind(on_release=_generar)
+        # Solo aquí: que el teclado suba la pantalla para ver lo que se escribe.
+        Window.softinput_mode = "pan"
+        pop.bind(on_dismiss=lambda *_: setattr(Window, "softinput_mode", ""))
         pop.open()
 
 
@@ -2013,6 +2035,7 @@ class CalificarScreen(Screen):
             Intent = autoclass("android.content.Intent")
             intent = Intent(Intent.ACTION_GET_CONTENT)
             intent.setType("image/*")
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, True)
             intent.addCategory(Intent.CATEGORY_OPENABLE)
             activity.bind(on_activity_result=self._on_galeria_result)
             ctx.startActivityForResult(intent, self._COD_GALERIA)
@@ -2029,26 +2052,46 @@ class CalificarScreen(Screen):
             pass
         if result not in (-1,) or intent is None:
             return
+        uris = []
         try:
-            uri = intent.getData()
+            clip = intent.getClipData()
+            if clip is not None:
+                for i in range(clip.getItemCount()):
+                    uris.append(clip.getItemAt(i).getUri())
         except Exception:
-            uri = None
-        if uri is None:
+            pass
+        if not uris:
+            try:
+                d = intent.getData()
+                if d is not None:
+                    uris.append(d)
+            except Exception:
+                pass
+        if not uris:
             return
-        Clock.schedule_once(lambda dt: self._procesar_galeria(uri), 0.1)
+        Clock.schedule_once(lambda dt: self._procesar_galeria_lote(uris), 0.1)
 
-    def _procesar_galeria(self, uri):
-        try:
-            img, copiados = self._leer_uri_imagen(uri)
-        except Exception as e:
-            import traceback
-            aviso("Cargar foto", "ERROR: %s\n\n%s" % (e, traceback.format_exc()))
-            return
-        if img is None:
-            aviso("Cargar foto",
-                  "No se pudo leer la imagen seleccionada (bytes: %s)." % copiados)
-            return
-        self._calificar_imagen(img)
+    def _procesar_galeria_lote(self, uris):
+        items = []
+        fallidos = 0
+        for uri in uris:
+            try:
+                img, _ = self._leer_uri_imagen(uri)
+            except Exception:
+                img = None
+            if img is None:
+                fallidos += 1
+                continue
+            try:
+                it = self._procesar_una(img)
+            except Exception:
+                it = None
+            if it is None:
+                fallidos += 1
+            else:
+                items.append(it)
+        self.construir()
+        self._mostrar_galeria(items, fallidos)
 
     def _foto_lista(self, ruta_foto):
         """Callback de plyer (iOS): lee la foto del archivo y la califica."""
@@ -2067,30 +2110,22 @@ class CalificarScreen(Screen):
             return
         self._calificar_imagen(img)
 
-    def _calificar_imagen(self, img):
-        """Pasa la imagen por el lector OMR y muestra el resultado."""
-        try:
-            import cv2
-            import lector_omr as L
-            clave_json = self._mapa_claves[self.sp_examen.text]
-            datos = L.cargar_datos_examen(clave_json)
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            marcas = L.detectar_marcas(gray)
-            if marcas is None:
-                aviso("No se detectó la hoja",
-                      "No se vieron las 4 marcas de esquina. Repite la foto con "
-                      "buena luz, la hoja completa, plana y sin sombras.")
-                return
-            recta, scale = L.corregir_perspectiva(img, marcas)
-            res = L.leer_respuestas(recta, datos.total_preguntas, scale)
-            anotada = L.dibujar_anotaciones(recta, res, datos.clave, scale, datos.nombre)
-            aciertos = sum(1 for q, r in res.respuestas.items()
-                           if r == datos.clave.get(q))
-        except Exception as e:
-            import traceback
-            aviso("Error al procesar", "%s\n\n%s" % (e, traceback.format_exc()))
-            return
-
+    def _procesar_una(self, img):
+        """Califica UNA imagen, registra la nota y devuelve {textura, titulo}.
+        Devuelve None si no se detectó la hoja (4 marcas)."""
+        import cv2
+        import lector_omr as L
+        clave_json = self._mapa_claves[self.sp_examen.text]
+        datos = L.cargar_datos_examen(clave_json)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        marcas = L.detectar_marcas(gray)
+        if marcas is None:
+            return None
+        recta, scale = L.corregir_perspectiva(img, marcas)
+        res = L.leer_respuestas(recta, datos.total_preguntas, scale)
+        anotada = L.dibujar_anotaciones(recta, res, datos.clave, scale, datos.nombre)
+        aciertos = sum(1 for q, r in res.respuestas.items()
+                       if r == datos.clave.get(q))
         self.examen = datos.nombre
         nombre = self._nombre_de_codigo(res.codigo_estudiante)
         archivo = f"camara_{res.codigo_estudiante}"
@@ -2099,9 +2134,97 @@ class CalificarScreen(Screen):
         self.resultados.append({"archivo": archivo, "codigo": res.codigo_estudiante,
                                 "aciertos": aciertos, "total": datos.total_preguntas,
                                 "nombre": nombre})
+        if nombre:
+            titulo = "%s  \u00b7  %d/%d" % (nombre, aciertos, datos.total_preguntas)
+        else:
+            titulo = "C\u00f3digo %s (sin nombre)  \u00b7  %d/%d" % (
+                res.codigo_estudiante, aciertos, datos.total_preguntas)
+        return {"textura": self._np_a_textura(anotada), "titulo": titulo}
+
+    def _calificar_imagen(self, img):
+        """Califica una sola imagen (cámara) y la muestra en la galería."""
+        try:
+            item = self._procesar_una(img)
+        except Exception as e:
+            import traceback
+            aviso("Error al procesar", "%s\n\n%s" % (e, traceback.format_exc()))
+            return
+        if item is None:
+            aviso("No se detectó la hoja",
+                  "No se vieron las 4 marcas de esquina. Repite la foto con "
+                  "buena luz, la hoja completa, plana y sin sombras.")
+            return
         self.construir()
-        self._popup_resultado(anotada, res.codigo_estudiante, aciertos,
-                              datos.total_preguntas, nombre)
+        self._mostrar_galeria([item])
+
+    def _mostrar_galeria(self, items, fallidos=0):
+        """Muestra los resultados como galería: foto grande con flechas ‹ › a los
+        costados para pasar de una hoja a la siguiente."""
+        if not items:
+            aviso("Calificar", "No se pudo leer ninguna hoja.%s\n\n"
+                  "Repite las fotos con buena luz, la hoja completa y plana."
+                  % (" (%d sin leer)" % fallidos if fallidos else ""))
+            return
+        estado = {"i": 0}
+        cont = FloatLayout()
+        img_w = Image(allow_stretch=True, keep_ratio=True,
+                      size_hint=(0.80, 0.80), pos_hint={"center_x": 0.5, "center_y": 0.52})
+        cont.add_widget(img_w)
+        lbl = Label(markup=True, size_hint=(0.78, None), height=dp(30),
+                    pos_hint={"center_x": 0.5, "top": 1},
+                    halign="center", valign="middle")
+        lbl.bind(size=lambda i, *_: setattr(i, "text_size", (i.width, i.height)))
+        cont.add_widget(lbl)
+        btn_prev = Factory.BotonAccion(text="\u2039", size_hint=(None, None),
+                                       size=(dp(46), dp(66)),
+                                       pos_hint={"x": 0.0, "center_y": 0.52})
+        btn_next = Factory.BotonAccion(text="\u203a", size_hint=(None, None),
+                                       size=(dp(46), dp(66)),
+                                       pos_hint={"right": 1.0, "center_y": 0.52})
+        cont.add_widget(btn_prev)
+        cont.add_widget(btn_next)
+        btn_x = Factory.BotonPeligro(text="X", size_hint=(None, None),
+                                     size=(dp(40), dp(40)),
+                                     pos_hint={"right": 1, "top": 1})
+        cont.add_widget(btn_x)
+        btn_ok = Factory.BotonExito(text="Confirmar", size_hint=(0.62, None),
+                                    height=dp(50), pos_hint={"center_x": 0.5, "y": 0.015})
+        cont.add_widget(btn_ok)
+
+        def mostrar():
+            i = estado["i"]
+            it = items[i]
+            img_w.texture = it["textura"]
+            lbl.text = "%s   \u00b7   [b]%d/%d[/b]" % (it["titulo"], i + 1, len(items))
+            uno = len(items) == 1
+            btn_prev.opacity = 0 if uno else (0.3 if i == 0 else 1)
+            btn_next.opacity = 0 if uno else (0.3 if i == len(items) - 1 else 1)
+            btn_prev.disabled = uno or i == 0
+            btn_next.disabled = uno or i == len(items) - 1
+
+        def ir(d):
+            estado["i"] = max(0, min(len(items) - 1, estado["i"] + d))
+            mostrar()
+
+        btn_prev.bind(on_release=lambda *_: ir(-1))
+        btn_next.bind(on_release=lambda *_: ir(1))
+        titulo_pop = "Resultados" + (" \u00b7 %d sin leer" % fallidos if fallidos else "")
+        pop = Popup(title=titulo_pop, content=cont, size_hint=(0.97, 0.93))
+        btn_x.bind(on_release=lambda *_: pop.dismiss())
+
+        def _confirmar(*_):
+            def _hacer():
+                items.clear()      # libera las imágenes de memoria
+                pop.dismiss()
+            confirmar("Confirmar",
+                      "Una vez confirmes ya no podr\u00e1s ver estas hojas de nuevo, "
+                      "a menos que vuelvas a subir las im\u00e1genes.\n\n"
+                      "Las notas quedan guardadas en el registro.",
+                      _hacer, txt_si="S\u00ed, estoy seguro",
+                      txt_no="D\u00e9jame revisar mejor")
+        btn_ok.bind(on_release=_confirmar)
+        mostrar()
+        pop.open()
 
     def _nombre_de_codigo(self, codigo):
         """Busca el nombre del estudiante en la lista, a partir del código leído."""
@@ -2276,8 +2399,6 @@ class CalificadorApp(App):
                 pass
         _registrar_fuentes()
         Window.clearcolor = FONDO
-        # Cuando aparece el teclado, sube la pantalla para no tapar el campo activo.
-        Window.softinput_mode = "pan"
         if platform != "android":
             Window.size = (400, 720)   # vista tipo celular para probar en PC
         GS.inicializar_sistema()
