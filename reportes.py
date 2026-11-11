@@ -51,6 +51,16 @@ def _buscar_clave(ruta_curso, examen):
     return None
 
 
+def _notas_validas(ruta_curso, examen):
+    """Hojas que sí se pueden asignar a un alumno: sin las ilegibles (ERROR) ni
+    las de códigos repetidos en hojas distintas (igual que el registro Excel;
+    se corrigen en la app con 'Corregir código')."""
+    notas = [r for r in RN.cargar_notas(ruta_curso, examen)
+             if RN.codigo_valido(r.get("codigo", ""))]
+    conflictos = RN.detectar_conflictos(notas)
+    return [r for r in notas if str(r.get("codigo", "")).strip() not in conflictos]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 1) JSON POR SALÓN (para el coordinador)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -64,7 +74,7 @@ def generar_json_salon(ruta_curso, examen, periodo):
     clave = {str(i + 1): arr[i] for i in range(len(arr))}
 
     roster = RN.cargar_roster(ruta_curso)                 # [{n_lista,codigo,nombre}]
-    notas = RN.cargar_notas(ruta_curso, examen)           # registros con respuestas
+    notas = _notas_validas(ruta_curso, examen)            # registros con respuestas
     notas_por_cod = {str(n.get("codigo", "")).zfill(3): n for n in notas}
 
     grado = ruta_curso.parent.name
@@ -74,10 +84,17 @@ def generar_json_salon(ruta_curso, examen, periodo):
         resp = reg.get("respuestas", {}) or {}
         fallos = []
         for q, correcta in clave.items():
-            marco = resp.get(q, "")
+            marco = resp.get(q) or ""   # burbuja vacía (None) -> "" (en blanco)
             if marco != correcta:
                 fallos.append({"p": int(q), "marco": marco})
         return fallos
+
+    def desempeno(reg):
+        # Los aciertos se recalculan con la clave VIGENTE: si la clave se corrigió
+        # después de calificar, los guardados quedan desfasados y el coordinador
+        # rechazaría el salón entero por inconsistencia.
+        fallos = incorrectas_de(reg)
+        return {"aciertos": total - len(fallos), "total": total, "incorrectas": fallos}
 
     estudiantes = []
     usados = set()
@@ -93,9 +110,7 @@ def generar_json_salon(ruta_curso, examen, periodo):
         else:
             estudiantes.append({
                 "codigo": cod, "n_lista": est["n_lista"],
-                "nombre": est["nombre"], "presento": True,
-                "aciertos": reg.get("aciertos"), "total": total,
-                "incorrectas": incorrectas_de(reg),
+                "nombre": est["nombre"], "presento": True, **desempeno(reg),
             })
 
     # Hojas calificadas cuyo código no está en la lista (no se pierde nada)
@@ -104,9 +119,8 @@ def generar_json_salon(ruta_curso, examen, periodo):
             continue
         estudiantes.append({
             "codigo": cod, "n_lista": None,
-            "nombre": reg.get("nombre", ""), "presento": True,
-            "aciertos": reg.get("aciertos"), "total": total,
-            "incorrectas": incorrectas_de(reg), "fuera_de_lista": True,
+            "nombre": reg.get("nombre", ""), "presento": True, **desempeno(reg),
+            "fuera_de_lista": True,
         })
 
     payload = {
@@ -143,7 +157,7 @@ def generar_reporte_docente(ruta_curso, examen):
     clave = {q + 1: arr[q] for q in range(len(arr))}
 
     roster = RN.cargar_roster(ruta_curso)
-    notas = RN.cargar_notas(ruta_curso, examen)
+    notas = _notas_validas(ruta_curso, examen)
     notas_por_cod = {str(n.get("codigo", "")).zfill(3): n for n in notas}
 
     grado = ruta_curso.parent.name
@@ -158,7 +172,7 @@ def generar_reporte_docente(ruta_curso, examen):
     centro = Alignment(horizontal="center", vertical="center")
 
     ws.merge_cells("A1:G1")
-    ws["A1"] = f"Reporte del docente — {examen}"
+    ws["A1"] = f"Reporte del docente — {str(examen).replace('_', ' ')}"
     _fuente(ws["A1"], size=14, bold=True)
     ws.merge_cells("A2:G2")
     ws["A2"] = f"{grado}°{curso}  ·  {total} preguntas  ·  {datetime.date.today().isoformat()}"
@@ -316,7 +330,9 @@ def generar_reporte_docente(ruta_curso, examen):
         wr.cell(row=rr, column=2, value=est["nombre"])
         incorrectas = []
         for q in range(1, total + 1):
-            marco = resp.get(str(q), "")
+            # Burbuja en blanco: se guarda como None (y antes salía en rojo,
+            # como si hubiera marcado una opción equivocada)
+            marco = resp.get(str(q)) or ""
             correcta = clave.get(q, "")
             celda = wr.cell(row=rr, column=2 + q, value=marco)
             celda.alignment = centro

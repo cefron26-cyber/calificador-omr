@@ -8,29 +8,21 @@ alumno, SIN importar el orden en que se escanearon las hojas.
 
 Fuente de las notas: el lector (lector_omr.py) deja, al calificar, un archivo
     profesores/.../<Curso>/resultados/notas_<examen>.json
-con un registro por hoja: {archivo, codigo, aciertos, total}.
+con un registro por hoja: {archivo, codigo, aciertos, total, respuestas, fecha}.
 
 Salida:
-    profesores/.../<Curso>/resultados/registro_<examen>.xlsx
-
-Puede ejecutarse solo (menú) o ser llamado por el lector automáticamente.
+    profesores/.../<Curso>/resultados_excel/registro_<examen>.xlsx
 """
 
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import Optional
 
-try:
-    from openpyxl import Workbook, load_workbook
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-except ImportError:
-    print("❌ Falta la librería 'openpyxl'. Instálala con:  pip install openpyxl")
-    sys.exit(1)
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-BASE_PROFESORES = Path("profesores")
 NOTA_APROBACION = 6.0
 
 
@@ -69,7 +61,39 @@ def cargar_notas(ruta_curso: Path, examen: str) -> list[dict]:
         return []
 
 
-def _examenes_disponibles(ruta_curso: Path) -> list[str]:
+def _firma_hoja(r: dict):
+    """Lo que identifica el CONTENIDO de una hoja: sus respuestas (o, en
+    registros viejos sin respuestas guardadas, sus aciertos)."""
+    resp = r.get("respuestas")
+    if resp:
+        return tuple(sorted((str(k), v) for k, v in resp.items()))
+    return ("aciertos", r.get("aciertos"))
+
+
+def codigo_valido(codigo) -> bool:
+    c = str(codigo or "").strip()
+    return bool(c) and c.isdigit()
+
+
+def detectar_conflictos(notas: list[dict]) -> set[str]:
+    """
+    Códigos que aparecen en VARIAS hojas DISTINTAS del mismo examen.
+
+    Si la misma hoja se fotografió dos veces (mismas respuestas), no es
+    conflicto: se toma la última. Pero si dos hojas con respuestas diferentes
+    dicen tener el mismo código, uno de los dos alumnos rellenó mal su código
+    (o se leyó mal) y la nota NO se puede asignar sin revisar.
+    """
+    firmas: dict[str, set] = {}
+    for r in notas:
+        cod = str(r.get("codigo", "")).strip()
+        if not codigo_valido(cod):
+            continue
+        firmas.setdefault(cod, set()).add(_firma_hoja(r))
+    return {cod for cod, fs in firmas.items() if len(fs) > 1}
+
+
+def examenes_disponibles(ruta_curso: Path) -> list[str]:
     carpeta = ruta_curso / "resultados"
     if not carpeta.exists():
         return []
@@ -86,12 +110,13 @@ def generar_registro(ruta_curso: Path, examen: str) -> Optional[Path]:
     """
     roster = cargar_roster(ruta_curso)
     if not roster:
-        print("  ⚠️  No hay planilla de estudiantes (estudiantes/lista_estudiantes.xlsx).")
-        print("     Genérala con gestor_estudiantes.py antes de registrar notas.")
         return None
 
-    notas = cargar_notas(ruta_curso, examen)
-    # Indexar notas por código (si un código se escaneó dos veces, gana el último)
+    notas = [r for r in cargar_notas(ruta_curso, examen)
+             if str(r.get("codigo", "")).strip() != "ERROR"]
+    # Códigos usados por hojas distintas: no se asigna nota hasta revisarlos
+    conflictos = detectar_conflictos(notas)
+    # Indexar notas por código (la misma hoja fotografiada dos veces: gana la última)
     por_codigo: dict[str, dict] = {}
     for r in notas:
         cod = str(r.get("codigo", "")).strip()
@@ -103,9 +128,7 @@ def generar_registro(ruta_curso: Path, examen: str) -> Optional[Path]:
     ws.title = "Registro"
 
     azul = PatternFill("solid", start_color="1F3864")
-    gris = PatternFill("solid", start_color="F2F2F2")
-    verde = PatternFill("solid", start_color="E2EFDA")
-    rojo = PatternFill("solid", start_color="FCE4E4")
+    ambar = PatternFill("solid", start_color="FFF2CC")
     blanco_negrita = Font(name="Arial", bold=True, color="FFFFFF", size=11)
     negrita = Font(name="Arial", bold=True, size=11)
     normal = Font(name="Arial", size=11)
@@ -113,7 +136,7 @@ def generar_registro(ruta_curso: Path, examen: str) -> Optional[Path]:
     izq = Alignment(horizontal="left", vertical="center")
     borde = Border(*[Side(style="thin", color="BFBFBF")] * 4)
 
-    titulo = f"REGISTRO DE NOTAS — {examen}   ({ruta_curso.parent.name}°{ruta_curso.name})"
+    titulo = f"REGISTRO DE NOTAS — {examen.replace('_', ' ')}   ({ruta_curso.parent.name}°{ruta_curso.name})"
     ws.append([titulo])
     ws.merge_cells("A1:G1")
     ws["A1"].font = Font(name="Arial", bold=True, size=13)
@@ -141,7 +164,12 @@ def generar_registro(ruta_curso: Path, examen: str) -> Optional[Path]:
         ws.cell(row=fila, column=3, value=est["nombre"]).font = normal
         ws.cell(row=fila, column=3).alignment = izq
 
-        if rec is not None and rec.get("total"):
+        if est["codigo"] in conflictos:
+            c_estado = ws.cell(row=fila, column=7, value="Revisar")
+            c_estado.alignment = centro
+            for col in range(1, 8):
+                ws.cell(row=fila, column=col).fill = ambar
+        elif rec is not None and rec.get("total"):
             aciertos = rec.get("aciertos", 0)
             total = rec.get("total")
             ws.cell(row=fila, column=4, value=aciertos).alignment = centro
@@ -189,88 +217,37 @@ def generar_registro(ruta_curso: Path, examen: str) -> Optional[Path]:
     ws.column_dimensions["G"].width = 13
     ws.freeze_panes = "A3"
 
-    # ── Hoja secundaria: hojas cuyo código NO está en la planilla ─────────────
+    # ── Hoja secundaria: hojas que no se pudieron asignar a un alumno ─────────
     codigos_roster = {e["codigo"] for e in roster}
-    huerfanos = [r for r in notas
-                 if str(r.get("codigo", "")).strip() not in codigos_roster]
-    if huerfanos:
+    por_revisar: list[tuple[dict, str]] = []
+    for r in notas:
+        cod = str(r.get("codigo", "")).strip()
+        if not codigo_valido(cod):
+            por_revisar.append((r, "Código ilegible (corrígelo en la app)"))
+        elif cod in conflictos:
+            por_revisar.append((r, "Código repetido en hojas distintas"))
+        elif cod not in codigos_roster:
+            por_revisar.append((r, "El código no está en la lista"))
+    if por_revisar:
         ws2 = wb.create_sheet("Por revisar")
-        ws2.append(["Archivo escaneado", "Código leído", "Aciertos", "Total"])
-        for col in range(1, 5):
+        ws2.append(["Archivo escaneado", "Código leído", "Aciertos", "Total", "Motivo"])
+        for col in range(1, 6):
             cc = ws2.cell(row=1, column=col)
             cc.fill = azul
             cc.font = blanco_negrita
             cc.alignment = centro
-        for r in huerfanos:
+        for r, motivo in por_revisar:
             ws2.append([r.get("archivo", ""), str(r.get("codigo", "")),
-                        r.get("aciertos", ""), r.get("total", "")])
+                        r.get("aciertos", ""), r.get("total", ""), motivo])
             ws2.cell(row=ws2.max_row, column=2).number_format = "@"
-        ws2.column_dimensions["A"].width = 34
+        ws2.column_dimensions["A"].width = 40
         ws2.column_dimensions["B"].width = 14
-        ws2["A" + str(ws2.max_row + 2)] = ("Estos códigos no coinciden con ningún alumno. "
-                                           "Revisa que el alumno haya rellenado bien su código.")
+        ws2.column_dimensions["E"].width = 38
+        ws2["A" + str(ws2.max_row + 2)] = ("Estas hojas no se asignaron a ningún alumno. "
+                                           "Corrige el código en la app (Calificar → "
+                                           "Corregir código) y vuelve a generar el registro.")
 
     salida = ruta_curso / "resultados_excel" / f"registro_{examen}.xlsx"
     salida.parent.mkdir(parents=True, exist_ok=True)
     wb.save(salida)
     return salida
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Menú independiente
-# ─────────────────────────────────────────────────────────────────────────────
-def _subdirs(ruta: Path) -> list[str]:
-    return sorted(d.name for d in ruta.iterdir() if d.is_dir()) if ruta.exists() else []
-
-
-def _elegir(titulo: str, opciones: list[str], etiqueta: str) -> int:
-    print("\n" + "=" * 55)
-    print(f"  {titulo}")
-    print("=" * 55)
-    for i, op in enumerate(opciones, 1):
-        print(f"  {i}. {op}")
-    while True:
-        try:
-            v = int(input(f"👉 {etiqueta}: ").strip())
-            if 1 <= v <= len(opciones):
-                return v - 1
-        except ValueError:
-            pass
-        print("⚠️ Opción inválida.")
-
-
-def main() -> None:
-    print("=" * 55)
-    print("   REGISTRO DE NOTAS — LICEO SAHAGÚN")
-    print("=" * 55)
-    if not BASE_PROFESORES.exists():
-        print(f"\n⚠️ No existe '{BASE_PROFESORES}'.")
-        sys.exit(1)
-
-    profesores = _subdirs(BASE_PROFESORES)
-    ruta_prof = BASE_PROFESORES / profesores[_elegir(
-        "Selecciona el PROFESOR", [p.replace('_', ' ') for p in profesores], "Profesor")]
-    grados = _subdirs(ruta_prof)
-    ruta_grado = ruta_prof / grados[_elegir("Selecciona el GRADO",
-                                            [f"Grado {g}" for g in grados], "Grado")]
-    cursos = _subdirs(ruta_grado)
-    ruta_curso = ruta_grado / cursos[_elegir("Selecciona el CURSO",
-                                             [f"Curso {c}" for c in cursos], "Curso")]
-
-    examenes = _examenes_disponibles(ruta_curso)
-    if not examenes:
-        print("\n⚠️ No hay notas registradas en este curso todavía.")
-        print("   Califica primero con lector_omr.py.")
-        sys.exit(1)
-
-    examen = examenes[_elegir("Selecciona el EXAMEN", examenes, "Examen")]
-    salida = generar_registro(ruta_curso, examen)
-    if salida:
-        print("\n" + "═" * 55)
-        print("✅ Registro de notas generado.")
-        print(f"📄 {salida.resolve()}")
-        print("═" * 55)
-
-
-if __name__ == "__main__":
-    main()

@@ -6,16 +6,17 @@ generador_pdf.py — Generador de Hojas de Respuesta OMR para el Liceo Sahagún.
 Escribe el PDF byte a byte, por lo que funciona en cualquier dispositivo
 (incluido Android ARM) sin librerías que compilen.
 
-El diseño geométrico (marcas de esquina y burbujas) coincide EXACTAMENTE con el
-motor de lectura de lector_omr.py: usa el sistema de coordenadas estándar del
-PDF (origen abajo-izquierda, en puntos), igual que el generador original.
+La geometría (marcas de esquina, burbujas, encabezado) sale de layout_hoja.py,
+el mismo archivo que usa lector_omr.py para leer: dibujo y lectura coinciden
+siempre. Formatos: hoja completa ("carta") o dos medias hojas por página
+("media_carta").
 """
 
-import os
-import json
 from pathlib import Path
 
-BASE_PROFESORES = Path("profesores")
+import layout_hoja as LH
+from layout_hoja import CM
+
 
 # Anchos estándar de la fuente Helvetica (Adobe AFM, en milésimas de em).
 # Solo se usan para CENTRAR texto; los caracteres fuera de rango usan 556.
@@ -51,13 +52,20 @@ def _escape_pdf(s):
 
 
 class _PDF:
-    """Mini-escritor de PDF de una sola página (carta), con Helvetica."""
+    """Mini-escritor de PDF (carta), con Helvetica e imágenes PNG. Una página,
+    o varias con nueva_pagina()."""
 
     def __init__(self, ancho=612.0, alto=792.0):
         self.W = ancho
         self.H = alto
-        self._ops = []  # lista de bytes (operadores del contenido)
-        self._img = None  # imagen opcional (logo)
+        self._ops = []       # lista de bytes (operadores del contenido de la página actual)
+        self._paginas = []   # contenido de las páginas anteriores, ya terminadas
+        self._imagenes = []  # objetos XObject de imagen, ya armados
+
+    def nueva_pagina(self):
+        """Termina la página actual; lo que se dibuje después va en otra."""
+        self._paginas.append(b"".join(self._ops))
+        self._ops = []
 
     # -- operadores de dibujo (coordenadas con origen abajo-izquierda) --
     def color_relleno(self, r, g, b):
@@ -68,6 +76,13 @@ class _PDF:
 
     def grosor_linea(self, w):
         self._ops.append(b"%.2f w\n" % w)
+
+    def punteado(self, trazo=0.0, espacio=0.0):
+        """Línea punteada (trazo y espacio en pt). Sin argumentos: línea continua."""
+        if trazo:
+            self._ops.append(b"[%.1f %.1f] 0 d\n" % (trazo, espacio))
+        else:
+            self._ops.append(b"[] 0 d\n")
 
     def rect_relleno(self, x, y, w, h):
         self._ops.append(b"%.2f %.2f %.2f %.2f re f\n" % (x, y, w, h))
@@ -101,46 +116,50 @@ class _PDF:
     def texto_centrado(self, x, y, s, size, bold=False, color=(0, 0, 0)):
         self.texto(x - _ancho_texto(s, size) / 2.0, y, s, size, bold, color)
 
-    def imagen(self, ruta, x, y, w, h):
-        """Incrusta una imagen (PNG/JPG) en (x,y) con tamaño w×h usando PIL.
-        Devuelve True si lo logró; False si PIL no está o falla."""
-        try:
-            from PIL import Image
-            import zlib
-            im = Image.open(ruta).convert("RGB")
-            maxpx = 500  # reducir para no inflar el PDF
-            if max(im.size) > maxpx:
-                f = maxpx / float(max(im.size))
-                im = im.resize((max(1, int(im.width * f)), max(1, int(im.height * f))))
-            datos = zlib.compress(im.tobytes())
-            self._img = {"w": im.width, "h": im.height, "data": datos}
-            self._ops.append(b"q %.2f 0 0 %.2f %.2f %.2f cm /ImLogo Do Q\n"
-                             % (w, h, x, y))
-            return True
-        except Exception:
-            return False
+    def registrar_png(self, datos_png):
+        """Registra un PNG y devuelve (nombre, ancho, alto) para dibujarlo con
+        imagen(). Se incrusta sin descomprimir: el PDF entiende el mismo
+        compresor y filtros que el PNG. Solo PNG de 8 bits, gris o RGB, sin
+        transparencia ni entrelazado; si no, devuelve None."""
+        info = _leer_png(datos_png)
+        if info is None:
+            return None
+        ancho, alto, colores, idat = info
+        espacio = b"/DeviceRGB" if colores == 3 else b"/DeviceGray"
+        self._imagenes.append(
+            b"<< /Type /XObject /Subtype /Image /Width %d /Height %d "
+            b"/ColorSpace %b /BitsPerComponent 8 /Filter /FlateDecode "
+            b"/DecodeParms << /Predictor 15 /Colors %d /BitsPerComponent 8 /Columns %d >> "
+            b"/Length %d >>\nstream\n%b\nendstream"
+            % (ancho, alto, espacio, colores, ancho, len(idat), idat))
+        return b"/Im%d" % len(self._imagenes), ancho, alto
+
+    def imagen(self, nombre, x, y, w, h):
+        self._ops.append(b"q %.2f 0 0 %.2f %.2f %.2f cm %b Do Q\n" % (w, h, x, y, nombre))
 
     def to_bytes(self):
-        contenido = b"".join(self._ops)
-        tiene_img = self._img is not None
-        xobj = b" /XObject << /ImLogo 7 0 R >>" if tiene_img else b""
+        paginas = self._paginas + [b"".join(self._ops)]
+        n = len(paginas)
+        # Objetos: 1 catálogo, 2 páginas, 3-4 fuentes, luego (página, contenido)
+        # por cada página, y al final las imágenes (compartidas por todas)
+        primera_img = 5 + 2 * n
+        recursos_img = b"".join(b"/Im%d %d 0 R " % (i + 1, primera_img + i)
+                                for i in range(len(self._imagenes)))
+        hijos = b" ".join(b"%d 0 R" % (5 + 2 * k) for k in range(n))
         objetos = [
             b"<< /Type /Catalog /Pages 2 0 R >>",
-            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-            (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.0f %.0f] "
-             b"/Resources << /Font << /F1 4 0 R /F2 5 0 R >>%b >> "
-             b"/Contents 6 0 R >>" % (self.W, self.H, xobj)),
+            b"<< /Type /Pages /Kids [%b] /Count %d >>" % (hijos, n),
             b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
             b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
-            b"<< /Length %d >>\nstream\n%b\nendstream" % (len(contenido), contenido),
         ]
-        if tiene_img:
-            im = self._img
+        for k, contenido in enumerate(paginas):
             objetos.append(
-                b"<< /Type /XObject /Subtype /Image /Width %d /Height %d "
-                b"/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode "
-                b"/Length %d >>\nstream\n" % (im["w"], im["h"], len(im["data"]))
-                + im["data"] + b"\nendstream")
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.0f %.0f] "
+                b"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> /XObject << %b>> >> "
+                b"/Contents %d 0 R >>" % (self.W, self.H, recursos_img, 6 + 2 * k))
+            objetos.append(b"<< /Length %d >>\nstream\n%b\nendstream"
+                           % (len(contenido), contenido))
+        objetos += self._imagenes
         salida = bytearray(b"%PDF-1.4\n")
         offsets = []
         for i, obj in enumerate(objetos, start=1):
@@ -157,89 +176,97 @@ class _PDF:
         return bytes(salida)
 
 
-_RUTAS_LOGO = [Path(__file__).resolve().parent / "logo.png", Path("logo.png")]
+def _leer_png(datos):
+    """(ancho, alto, colores, datos_IDAT) de un PNG que el PDF puede usar tal
+    cual, o None si el PNG no es compatible."""
+    import struct
+    if not datos.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    pos, idat, ihdr = 8, [], None
+    while pos + 8 <= len(datos):
+        largo, tipo = struct.unpack(">I4s", datos[pos:pos + 8])
+        cuerpo = datos[pos + 8:pos + 8 + largo]
+        if tipo == b"IHDR":
+            ihdr = struct.unpack(">IIBBBBB", cuerpo)
+        elif tipo == b"IDAT":
+            idat.append(cuerpo)
+        elif tipo == b"IEND":
+            break
+        pos += 12 + largo
+    if ihdr is None or not idat:
+        return None
+    ancho, alto, bits, tipo_color, _, _, entrelazado = ihdr
+    colores = {0: 1, 2: 3}.get(tipo_color)
+    if bits != 8 or colores is None or entrelazado:
+        return None
+    return ancho, alto, colores, b"".join(idat)
 
 
-def generar_hoja_omr(archivo_salida, num_preguntas: int) -> None:
-    """Genera el PDF de la hoja OMR (Python puro). Misma geometría que el lector."""
-    CM = 28.3464567
-    pdf = _PDF(612.0, 792.0)
-    W, H = pdf.W, pdf.H
+# Logo reducido para el PDF (el logo.png original pesa ~1.7 MB). Si no está,
+# se usa el original; si ninguno sirve, la hoja sale sin logo.
+_DIR = Path(__file__).resolve().parent
+_RUTAS_LOGO = [_DIR / "assets" / "logo_pdf.png", _DIR / "logo.png", Path("logo.png")]
+
+
+def _cargar_logo(pdf):
+    for ruta in _RUTAS_LOGO:
+        try:
+            if ruta.exists():
+                reg = pdf.registrar_png(ruta.read_bytes())
+                if reg:
+                    return reg
+        except Exception:
+            pass
+    return None
+
+
+def _dibujar_hoja(pdf, f, y0, num_preguntas, logo):
+    """Dibuja UNA hoja del formato f. y0 = distancia (pt) del borde superior de
+    la página al borde superior de esta hoja. Las posiciones salen de
+    layout_hoja (origen arriba-izquierda); aquí se pasan al sistema del PDF."""
+    def Y(y):  # de "Y hacia abajo dentro de la hoja" a "Y del PDF"
+        return pdf.H - (y0 + y)
 
     GRIS = (0.4, 0.4, 0.4)
     NEGRO = (0.0, 0.0, 0.0)
 
-    margen = 1.5 * CM
-    tamano_marca = 0.5 * CM
-
     # 1. MARCAS DE REFERENCIA (cuadrados negros en las 4 esquinas)
     pdf.color_relleno(0, 0, 0)
-    pdf.rect_relleno(margen, margen, tamano_marca, tamano_marca)
-    pdf.rect_relleno(W - margen - tamano_marca, margen, tamano_marca, tamano_marca)
-    pdf.rect_relleno(margen, H - margen - tamano_marca, tamano_marca, tamano_marca)
-    pdf.rect_relleno(W - margen - tamano_marca, H - margen - tamano_marca,
-                     tamano_marca, tamano_marca)
+    t = f.tam_marca
+    for cx, cy in f.esquinas():
+        pdf.rect_relleno(cx - t / 2, Y(cy) - t / 2, t, t)
+    # Marca de orientación: le dice al lector cuál es la esquina superior izquierda
+    ox, oy, lado = f.orientacion()
+    pdf.rect_relleno(ox - lado / 2, Y(oy) - lado / 2, lado, lado)
 
     # 2. ENCABEZADO
-    pdf.texto(margen + 1.0 * CM, H - 2.5 * CM,
-              "Liceo Sahagún - Hoja de Respuestas", 16, bold=True)
-    pdf.texto(margen + 1.0 * CM, H - 3.8 * CM,
-              "Nombres y Apellidos: _____________________________________________", 11)
-    pdf.texto(margen + 1.0 * CM, H - 4.8 * CM,
-              "Grado y Curso: __________________   Asignatura: __________________", 11)
+    pdf.texto(f.x_texto, Y(f.y_titulo), "Liceo Sahagún - Hoja de Respuestas",
+              f.tam_titulo, bold=True)
+    pdf.texto(f.x_texto, Y(f.y_nombre), f.campo_nombre, f.tam_campos)
+    pdf.texto(f.x_texto, Y(f.y_grado), f.campo_grado, f.tam_campos)
 
-    # 3. LOGO (se incrusta si existe; si no, casilla marcador)
-    logo_w = 4.0 * CM
-    logo_h = 3.5 * CM
-    pos_logo_x = W - margen - logo_w - 1.5 * CM
-    pos_logo_y = H - 5.0 * CM
-    ruta_logo = None
-    for _r in _RUTAS_LOGO:
-        if _r.exists():
-            ruta_logo = _r
-            break
-    colocado = False
-    if ruta_logo is not None:
-        lado = min(logo_w, logo_h)  # el logo es cuadrado: se centra sin deformar
-        lx = pos_logo_x + (logo_w - lado) / 2.0
-        ly = pos_logo_y + (logo_h - lado) / 2.0
-        colocado = pdf.imagen(str(ruta_logo), lx, ly, lado, lado)
-    if not colocado:
-        pdf.color_linea(0, 0, 0)
-        pdf.grosor_linea(1)
-        pdf.color_relleno(0.92, 0.92, 0.92)
-        pdf.rect_caja(pos_logo_x, pos_logo_y, logo_w, logo_h)
-        pdf.texto_centrado(pos_logo_x + logo_w / 2,
-                           pos_logo_y + logo_h / 2 - 0.1 * CM, "[ LOGO ]", 10, bold=True)
+    # 3. LOGO (centrado en su casilla, sin deformar)
+    if logo:
+        nombre, iw, ih = logo
+        lx, ly, lw, lh = f.logo
+        esc = min(lw / iw, lh / ih)
+        w, h = iw * esc, ih * esc
+        pdf.imagen(nombre, lx + (lw - w) / 2, Y(ly + (lh + h) / 2), w, h)
 
     # 4. INSTRUCCIONES DE MARCADO
-    y_instrucciones = H - 6.2 * CM
-    pdf.texto(margen + 1.0 * CM, y_instrucciones, "INSTRUCCIONES DE MARCADO:", 9, bold=True)
-    pdf.texto(margen + 1.0 * CM, y_instrucciones - 0.5 * CM,
-              "Use lápiz o lapicero negro. Rellene COMPLETAMENTE el círculo sin salirse.", 8.5)
-    pdf.texto(margen + 1.0 * CM, y_instrucciones - 0.9 * CM,
-              "- Forma correcta: el círculo totalmente relleno. Evite equis, chulos o medio relleno.", 8.5)
-    pdf.texto(margen + 1.0 * CM, y_instrucciones - 1.3 * CM,
-              "- El código del estudiante se rellena con los tres dígitos que indique el docente.", 8.5)
+    for y, txt, tam, negrita in f.instrucciones:
+        pdf.texto(f.x_texto, Y(y), txt, tam, bold=negrita)
 
     # 5. TÍTULOS DE COLUMNAS
-    y_titulos = y_instrucciones - 2.5 * CM
-    inicio_x_codigo = margen + 1.0 * CM
-    inicio_x_preguntas = margen + 6.5 * CM
-    pdf.texto(inicio_x_codigo, y_titulos, "CÓDIGO ALUMNO", 10, bold=True)
-    pdf.texto(inicio_x_preguntas, y_titulos, "RESPUESTAS", 10, bold=True)
+    pdf.texto(f.x_codigo_titulo, Y(f.y_titulos), "CÓDIGO ALUMNO", f.tam_titulos, bold=True)
+    pdf.texto(f.x_preguntas, Y(f.y_titulos), "RESPUESTAS", f.tam_titulos, bold=True)
 
-    radio_burbuja = 0.22 * CM
-    espacio_y = 0.58 * CM
-    espacio_x = 0.65 * CM
-    y_inicio_burbujas = y_titulos - 1.0 * CM
-
-    # Flecha minimalista
+    # Flecha minimalista sobre las columnas del código
     pdf.color_linea(0.2, 0.2, 0.2)
     pdf.grosor_linea(1)
-    x_start = inicio_x_codigo + 0.3 * CM
-    x_end = x_start + (2 * espacio_x)
-    y_flecha = y_titulos - 0.35 * CM
+    x_start = f.x_codigo
+    x_end = x_start + 2 * f.esp_x
+    y_flecha = Y(f.y_titulos + 0.35 * CM)
     pdf.linea(x_start, y_flecha, x_end, y_flecha)
     pdf.linea(x_end, y_flecha, x_end - 0.15 * CM, y_flecha + 0.1 * CM)
     pdf.linea(x_end, y_flecha, x_end - 0.15 * CM, y_flecha - 0.1 * CM)
@@ -247,32 +274,52 @@ def generar_hoja_omr(archivo_salida, num_preguntas: int) -> None:
     # 6. MATRIZ: CÓDIGO ALUMNO (3 columnas, dígitos 0-9)
     pdf.color_linea(0, 0, 0)
     pdf.grosor_linea(0.8)
-    for fila in range(10):
-        for col in range(3):
-            x = inicio_x_codigo + 0.3 * CM + (col * espacio_x)
-            y = y_inicio_burbujas - (fila * espacio_y)
-            pdf.circulo(x, y, radio_burbuja)
-            pdf.texto_centrado(x, y - 0.08 * CM, str(fila), 7.5, color=GRIS)
+    for _, dig, x, y in f.burbujas_codigo():
+        pdf.circulo(x, Y(y), f.radio)
+        pdf.texto_centrado(x, Y(y) - 0.08 * CM, dig, 7.5, color=GRIS)
 
     # 7. MATRIZ: RESPUESTAS (A, B, C, D)
-    opciones = ['A', 'B', 'C', 'D']
-    columna_actual = 0
-    fila_actual = 0
-    max_filas_por_columna = 25
     for i in range(1, num_preguntas + 1):
-        if fila_actual >= max_filas_por_columna:
-            fila_actual = 0
-            columna_actual += 1
-        y = y_inicio_burbujas - (fila_actual * espacio_y)
-        x_base = inicio_x_preguntas + (columna_actual * 4.6 * CM)
-        pdf.texto(x_base, y - 0.1 * CM, f"{i:02d}.", 9.5, color=NEGRO)
-        for j, opc in enumerate(opciones):
-            x_burbuja = x_base + 0.8 * CM + (j * espacio_x)
-            pdf.color_linea(0, 0, 0)
-            pdf.grosor_linea(0.8)
-            pdf.circulo(x_burbuja, y, radio_burbuja)
-            pdf.texto_centrado(x_burbuja, y - 0.08 * CM, opc, 7.5, color=GRIS)
-        fila_actual += 1
+        x_base, y = f.posicion_pregunta(i)
+        pdf.texto(x_base, Y(y) - 0.1 * CM, f"{i:02d}.", 9.5, color=NEGRO)
+    pdf.color_linea(0, 0, 0)
+    pdf.grosor_linea(0.8)
+    for _, opc, x, y in f.burbujas_respuesta(num_preguntas):
+        pdf.circulo(x, Y(y), f.radio)
+        pdf.texto_centrado(x, Y(y) - 0.08 * CM, opc, 7.5, color=GRIS)
+
+
+def generar_hoja_omr(archivo_salida, num_preguntas: int, formato="carta") -> None:
+    """
+    Genera el PDF de la hoja OMR (Python puro). La geometría sale de
+    layout_hoja.py, la misma que usa el lector.
+
+    formato: "carta" (una hoja por página) o "media_carta" (dos hojas iguales
+    por página, con línea de corte).
+    """
+    f = LH.obtener(formato)
+    if not 1 <= num_preguntas <= f.max_preguntas:
+        raise ValueError(f"El formato '{f.descripcion}' admite de 1 a "
+                         f"{f.max_preguntas} preguntas (pediste {num_preguntas}).")
+    pdf = _PDF(LH.CARTA_W, LH.CARTA_H)
+    logo = _cargar_logo(pdf)
+
+    for k in range(f.hojas_por_pagina):
+        _dibujar_hoja(pdf, f, k * f.alto, num_preguntas, logo)
+
+    # Línea de corte entre las dos hojas
+    if f.hojas_por_pagina == 2:
+        y_corte = pdf.H - f.alto
+        etiqueta = "recortar por aquí"
+        ancho_et = _ancho_texto(etiqueta, 7) + 0.4 * CM
+        x_et = (pdf.W - ancho_et) / 2
+        pdf.color_linea(0.55, 0.55, 0.55)
+        pdf.grosor_linea(0.6)
+        pdf.punteado(4, 3)
+        pdf.linea(0.5 * CM, y_corte, x_et, y_corte)
+        pdf.linea(x_et + ancho_et, y_corte, pdf.W - 0.5 * CM, y_corte)
+        pdf.punteado()
+        pdf.texto_centrado(pdf.W / 2, y_corte - 2.5, etiqueta, 7, color=(0.45, 0.45, 0.45))
 
     salida = Path(archivo_salida)
     salida.parent.mkdir(parents=True, exist_ok=True)
@@ -280,103 +327,95 @@ def generar_hoja_omr(archivo_salida, num_preguntas: int) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SELECCIÓN DE PROFESOR / GRADO / CURSO  (uso por consola en PC)
+# Hojas de códigos: una página por salón, para pegar en el salón o dictar
 # ─────────────────────────────────────────────────────────────────────────────
-def _subdirs(ruta: Path) -> list:
-    if not ruta.exists():
-        return []
-    return sorted(d.name for d in ruta.iterdir() if d.is_dir())
+AZUL_PDF = (0.075, 0.161, 0.294)   # azul del escudo (igual que la app)
+GRIS_PDF = (0.42, 0.45, 0.52)
 
 
-def _elegir_o_crear(ruta_padre: Path, titulo: str, etiqueta: str,
-                    transform=lambda s: s.strip()) -> Path:
-    existentes = _subdirs(ruta_padre)
-    print(f"\n[ {titulo} ]")
-    for i, nombre in enumerate(existentes, 1):
-        print(f"  {i}. {nombre.replace('_', ' ')}")
-    print(f"  {len(existentes) + 1}. [Crear nuevo]")
-    while True:
-        try:
-            op = int(input("👉 Opción: ").strip())
-        except ValueError:
-            print("⚠️ Ingresa un número.")
-            continue
-        if 1 <= op <= len(existentes):
-            return ruta_padre / existentes[op - 1]
-        if op == len(existentes) + 1:
-            nuevo = transform(input(f"   Nombre del {etiqueta}: "))
-            while not nuevo:
-                nuevo = transform(input(f"   ⚠️ No puede ir vacío. {etiqueta}: "))
-            ruta = ruta_padre / nuevo
-            ruta.mkdir(parents=True, exist_ok=True)
-            return ruta
-        print("⚠️ Opción inválida.")
+def _ajustar(s, size, ancho_max, minimo):
+    """Tamaño de letra para que s quepa en ancho_max (sin bajar de 'minimo').
+    Las negritas son ~6 % más anchas que la Helvetica normal."""
+    ancho = _ancho_texto(s, size) * 1.06
+    return size if ancho <= ancho_max else max(minimo, size * ancho_max / ancho)
 
 
-def seleccionar_curso() -> Path:
-    BASE_PROFESORES.mkdir(parents=True, exist_ok=True)
-    ruta_prof = _elegir_o_crear(
-        BASE_PROFESORES, "Paso 1: Profesor", "profesor",
-        transform=lambda s: s.strip().replace(" ", "_"))
-    ruta_grado = _elegir_o_crear(
-        ruta_prof, "Paso 2: Grado (Ej: 11)", "grado",
-        transform=lambda s: s.strip())
-    ruta_curso = _elegir_o_crear(
-        ruta_grado, "Paso 3: Curso/Salón (Ej: A)", "curso",
-        transform=lambda s: s.strip().upper())
-    return ruta_curso
+def _pagina_codigos(pdf, titulo, docente, estudiantes, logo):
+    """Una página carta vertical: encabezado + tabla Código | Nombre con la
+    letra lo más grande posible para que todo el salón quepa en la hoja."""
+    W, H = pdf.W, pdf.H
+    m = 1.4 * CM                       # márgenes laterales
+    # Encabezado
+    if logo:
+        nombre, lw, lh = logo
+        alto_logo = 1.9 * CM
+        pdf.imagen(nombre, W - m - alto_logo * lw / lh, H - m - alto_logo,
+                   alto_logo * lw / lh, alto_logo)
+    pdf.texto(m, H - m - 10, "Liceo Sahagún", 11, color=GRIS_PDF)
+    pdf.texto(m, H - m - 38, f"Códigos · {titulo}", _ajustar(f"Códigos · {titulo}", 26,
+                                                               W - 2 * m - 3 * CM, 16),
+              bold=True, color=AZUL_PDF)
+    n = len(estudiantes)
+    sub = f"{n} estudiante{'s' if n != 1 else ''}"
+    if docente:
+        sub = f"Docente: {docente}   ·   {sub}"
+    pdf.texto(m, H - m - 58, sub, 11, color=GRIS_PDF)
+    y = H - m - 70
+    pdf.color_linea(*AZUL_PDF)
+    pdf.grosor_linea(1.5)
+    pdf.linea(m, y, W - m, y)
+
+    # Tabla
+    ancho = W - 2 * m
+    col_cod = 3.6 * CM
+    y -= 12
+    alto_enc = 22
+    pdf.color_relleno(*AZUL_PDF)
+    pdf.rect_relleno(m, y - alto_enc, ancho, alto_enc)
+    pdf.texto_centrado(m + col_cod / 2, y - 15, "Código", 11, bold=True, color=(1, 1, 1))
+    pdf.texto(m + col_cod + 10, y - 15, "Nombre del estudiante", 11, bold=True,
+              color=(1, 1, 1))
+    y -= alto_enc
+    pie = 1.4 * CM
+    fila = min(36.0, (y - pie) / max(n, 1))
+    t_cod = min(26.0, fila * 0.88)
+    t_nom = min(19.0, fila * 0.72)
+    ancho_nom = ancho - col_cod - 20
+    for i, (codigo, nombre) in enumerate(estudiantes):
+        arriba = y - i * fila
+        if i % 2:
+            pdf.color_relleno(0.925, 0.945, 0.98)
+            pdf.rect_relleno(m, arriba - fila, ancho, fila)
+        base = arriba - fila / 2 - t_cod * 0.35
+        pdf.texto_centrado(m + col_cod / 2, base, codigo, t_cod, bold=True, color=AZUL_PDF)
+        tn = _ajustar(nombre, t_nom, ancho_nom, 6)
+        pdf.texto(m + col_cod + 10, arriba - fila / 2 - tn * 0.35, nombre, tn)
+    # Separador de columnas y borde
+    abajo = y - n * fila
+    pdf.color_linea(0.75, 0.78, 0.84)
+    pdf.grosor_linea(0.8)
+    pdf.linea(m + col_cod, y, m + col_cod, abajo)
+    pdf.linea(m, abajo, W - m, abajo)
+    pdf.texto_centrado(W / 2, m * 0.7, "Rellena en tu hoja de respuestas el código "
+                       "tal como aparece aquí (3 números).", 9.5, color=GRIS_PDF)
 
 
-def main() -> None:
-    print("=" * 60)
-    print("🎓 GENERADOR DE EXÁMENES OMR — Liceo Sahagún")
-    print("=" * 60)
-    ruta_curso = seleccionar_curso()
-    dir_claves = ruta_curso / "examenes_claves"
-    dir_pdf = ruta_curso / "hojas_pdf"
-    dir_claves.mkdir(parents=True, exist_ok=True)
-    dir_pdf.mkdir(parents=True, exist_ok=True)
+def generar_hojas_codigos(archivo_salida, salones, docente="") -> None:
+    """
+    PDF con los códigos de los estudiantes: UNA página carta vertical por
+    salón (6 salones = 6 páginas), en letra grande para pegar en el salón o
+    dictar los códigos.
 
-    nombre_examen = input("\n📝 Nombre del examen (Ej: Mat_11A): ").strip()
-    while not nombre_examen:
-        nombre_examen = input("⚠️ El nombre no puede estar vacío: ").strip()
-    nombre_examen = nombre_examen.replace(" ", "_")
-
-    while True:
-        try:
-            cantidad = int(input("❓ Cantidad de preguntas (1-50): "))
-            if 1 <= cantidad <= 50:
-                break
-            print("⚠️ Debe estar entre 1 y 50.")
-        except ValueError:
-            print("⚠️ Ingresa un número entero válido.")
-
-    print(f"\n🔑 Clave para {cantidad} preguntas.")
-    print("Escribe las opciones correctas seguidas, sin espacios (Ej: ABDC...)")
-    respuestas_str = input("Respuestas correctas: ").strip().upper()
-    while len(respuestas_str) != cantidad or not all(l in "ABCD" for l in respuestas_str):
-        print(f"❌ Debes ingresar exactamente {cantidad} letras (solo A, B, C o D).")
-        respuestas_str = input("Respuestas correctas: ").strip().upper()
-
-    array_respuestas = list(respuestas_str)
-    ruta_pdf = dir_pdf / f"{nombre_examen}_hoja.pdf"
-    ruta_json = dir_claves / f"respuestas_{nombre_examen}.json"
-    datos_examen = {
-        "examen": nombre_examen,
-        "total_preguntas": cantidad,
-        "clave_correctas": array_respuestas,
-    }
-    try:
-        with open(ruta_json, "w", encoding="utf-8") as f:
-            json.dump(datos_examen, f, indent=4, ensure_ascii=False)
-        print("\n🎨 Dibujando hoja de respuestas PDF...")
-        generar_hoja_omr(ruta_pdf, cantidad)
-        print("\n✅ ¡PROCESO COMPLETADO!")
-        print(f"📄 Plantilla PDF: {ruta_pdf}")
-        print(f"🔑 Clave JSON:    {ruta_json}")
-    except Exception as e:
-        print(f"\n❌ Error al guardar los archivos: {e}")
-
-
-if __name__ == "__main__":
-    main()
+    salones: [(titulo, [(codigo, nombre), ...]), ...]  p. ej. ("Grado 11° A", ...)
+    """
+    if not salones:
+        raise ValueError("No hay salones con estudiantes.")
+    pdf = _PDF(LH.CARTA_W, LH.CARTA_H)
+    logo = _cargar_logo(pdf)
+    for k, (titulo, estudiantes) in enumerate(salones):
+        if k:
+            pdf.nueva_pagina()
+        _pagina_codigos(pdf, titulo, docente, estudiantes, logo)
+    salida = Path(archivo_salida)
+    salida.parent.mkdir(parents=True, exist_ok=True)
+    salida.write_bytes(pdf.to_bytes())

@@ -13,29 +13,43 @@ source.dir = .
 # Tipos de archivo que se empaquetan dentro del APK
 source.include_exts = py,png,jpg,jpeg,kv,atlas,ttf,json
 
+# Carpetas que NO van en el APK (muestras de prueba y datos locales del PC)
+source.exclude_dirs = muestras,profesores,__pycache__,camerax_provider,pruebas,bin,.git,.github
+# logo.png es el original (1.7 MB); el PDF usa assets/logo_pdf.png
+source.exclude_patterns = logo.png
+
 # Versión de la app
-version = 0.1
+version = 1.0
 
 # Librerías que necesita la app
-requirements = python3,kivy,opencv,numpy,pillow,openpyxl,et_xmlfile,plyer,pyjnius,camera4kivy,gestures4kivy
+# charset_normalizer fijado en 3.4.9: desde la 3.5.0 trae una versión compilada
+# para Android que python-for-android no logra instalar (la pide Kivy vía requests)
+requirements = python3,kivy,opencv,numpy,pillow,openpyxl,et_xmlfile,plyer,pyjnius,camera4kivy,gestures4kivy,charset_normalizer==3.4.9
 
 # La app se ve en vertical
 orientation = portrait
 fullscreen = 0
 
-# Permisos de Android
-android.permissions = CAMERA,VIBRATE,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE
+# Permisos de Android. CAMERA: cámara integrada (camera4kivy). No hace falta
+# leer el almacenamiento (fotos y planillas se eligen con el selector del
+# sistema). WRITE solo lo usa Android 9 o anterior para Descargas.
+android.permissions = CAMERA,VIBRATE,WRITE_EXTERNAL_STORAGE
 
 # Arquitectura (cubre los celulares modernos)
 android.archs = arm64-v8a
 
-# camera4kivy/CameraX exige API 33
+# Nivel de API de Android para compilar
 android.api = 33
 
-# Activa el proveedor de cámara CameraX (necesita la carpeta camerax_provider/ en el repo)
+# Activa el proveedor de cámara CameraX para camera4kivy
+# (necesita la carpeta camerax_provider/ en el repositorio)
 p4a.hook = camerax_provider/gradle_options.py
 
 android.allow_backup = 1
+
+# Acepta solo las licencias del SDK de Android (necesario al compilar en GitHub,
+# donde nadie puede escribir "y" para aceptarlas)
+android.accept_sdk_license = True
 
 # --- Opcionales: descomenta si quieres usar el logo como ícono/splash ---
 # icon.filename = %(source.dir)s/logo.png

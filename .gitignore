@@ -1,0 +1,11 @@
+# Datos del docente (listas, exámenes, notas y fotos): nunca al repositorio
+profesores/
+# Python
+__pycache__/
+*.pyc
+# Compilación del APK
+.buildozer/
+bin/
+# Se generan con pruebas/generar_pruebas.py y pruebas/verificar_hoja_mayor.py
+pruebas/fotos/
+pruebas/hoja_mayor/
