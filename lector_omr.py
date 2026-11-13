@@ -368,6 +368,107 @@ def detectar_marcas(img_gray: np.ndarray) -> Optional[np.ndarray]:
     return juegos[0] if juegos else None
 
 
+def marcas_en_vivo(img_gray: np.ndarray, formato=None, a_fondo: bool = True
+                   ) -> tuple[Optional[np.ndarray], list[tuple[float, float]]]:
+    """
+    Detección rápida para la vista previa de la cámara (cuadros pequeños,
+    ~640 px): dice si YA se ven las 4 marcas de esquina, para tomar la foto
+    con confianza. No lee nada ni cambia la calificación: la foto final pasa
+    por leer_foto() como siempre.
+
+    Devuelve (cuatro, sueltas):
+      cuatro:  array (4, 2) con las 4 marcas [arriba-izq, arriba-der,
+               abajo-der, abajo-izq] según el cuadro, o None si no están.
+      sueltas: cuando no están las 4, los cuadrados negros que sí se ven
+               cerca de las esquinas del papel [(x, y)], como guía.
+    a_fondo=False se salta el segundo intento (escanear la hoja), que es
+    varias veces más lento: la cámara lo alterna para no recalentar el celular.
+    """
+    f = LH.obtener(formato)
+    binarios = _binarios_marcas(img_gray)
+    marcas = _cuatro_en_vivo(img_gray, f, binarios)
+    if marcas is not None:
+        return marcas, []
+
+    # Igual que leer_foto: con sombra fuerte las marcas se pierden en la foto
+    # tal cual, pero aparecen al "escanear" la hoja (recortada y con luz pareja)
+    try:
+        marcas = _cuatro_en_vivo_escaneada(img_gray, f) if a_fondo else None
+    except Exception:
+        marcas = None
+    if marcas is not None:
+        return marcas, []
+
+    # Sin las 4: lo mejor que se ve cerca de cada esquina del papel
+    (px, py, pw, ph), cerrados = binarios
+    esquinas = [(px, py), (px + pw, py), (px + pw, py + ph), (px, py + ph)]
+    radio = 0.22 * float(np.hypot(pw, ph))
+    mejor: list[_Candidato] = []
+    for cerrado in cerrados:
+        cands = _marcas_candidatos(cerrado, pw)
+        vistas = []
+        for ex, ey in esquinas:
+            cerca = [c for c in cands if np.hypot(c.x - ex, c.y - ey) < radio]
+            if cerca:
+                vistas.append(max(cerca, key=lambda c: c.cuadratura))
+        # Las marcas son del mismo tamaño: lo que no se parece al resto es ruido
+        if len(vistas) >= 2:
+            area = float(np.median([c.area for c in vistas]))
+            vistas = [c for c in vistas if area / 2.5 <= c.area <= area * 2.5]
+        if len(vistas) > len(mejor):
+            mejor = vistas
+    return None, [(c.x, c.y) for c in mejor]
+
+
+def _cuatro_en_vivo(img_gray: np.ndarray, f: LH.Formato,
+                    binarios=None) -> Optional[np.ndarray]:
+    """El primer juego de 4 marcas que pasa la comprobación, o None."""
+    binarios = binarios or _binarios_marcas(img_gray)
+    for cuadratura_min in (RELLENO_CUADRADO, RELLENO_CUADRADO_TOLERANTE):
+        for marcas in candidatos_marcas(img_gray, maximo=3,
+                                        cuadratura_min=cuadratura_min,
+                                        binarios=binarios):
+            if _marcas_en_vivo_verificadas(img_gray, marcas, f):
+                return marcas
+    return None
+
+
+def _cuatro_en_vivo_escaneada(img_gray: np.ndarray, f: LH.Formato) -> Optional[np.ndarray]:
+    """Busca las 4 marcas sobre la hoja recortada y con luz pareja (como hace
+    el digitalizador) y las devuelve en coordenadas del cuadro original."""
+    esquinas = D.detectar_hoja(cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR))
+    if esquinas is None:
+        return None
+    tl, tr, br, bl = D.ordenar_esquinas(esquinas)
+    ancho = int(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl)))
+    alto = int(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr)))
+    if ancho < 50 or alto < 50:
+        return None
+    destino = np.float32([[0, 0], [ancho - 1, 0], [ancho - 1, alto - 1], [0, alto - 1]])
+    M = cv2.getPerspectiveTransform(np.float32([tl, tr, br, bl]), destino)
+    hoja = cv2.warpPerspective(img_gray, M, (ancho, alto),
+                               borderMode=cv2.BORDER_REPLICATE)
+    hoja = D.aplanar_iluminacion(hoja)
+    marcas = _cuatro_en_vivo(hoja, f)
+    if marcas is None:
+        return None
+    return cv2.perspectiveTransform(marcas.reshape(1, 4, 2).astype(np.float32),
+                                    np.linalg.inv(M)).reshape(4, 2)
+
+
+def _marcas_en_vivo_verificadas(img_gray: np.ndarray, marcas: np.ndarray,
+                                f: LH.Formato) -> bool:
+    """Endereza el cuadro a 1 px/pt (pequeño y rápido) y comprueba que en las
+    4 esquinas haya un cuadrado negro rodeado de papel."""
+    try:
+        orden = _orientar_marcas(img_gray, marcas, f)
+        M = cv2.getPerspectiveTransform(orden, esquinas_pdf(f))
+        recta = cv2.warpPerspective(img_gray, M, (int(f.ancho), int(f.alto)))
+        return _marcas_verificadas(recta, 1.0, f.clave)
+    except Exception:
+        return False
+
+
 def _relleno_cuadro(gray: np.ndarray, cx: float, cy: float, lado: float,
                     scale: float, umbral: float) -> float:
     """Fracción de píxeles oscuros en el centro de un cuadro (coords en pt)."""
@@ -1402,3 +1503,40 @@ def calificar_foto(ruta_cruda: Path, ruta_json: Path, ruta_curso: Path,
     if alertas:
         registro["alertas"] = alertas
     return registro
+
+
+def corregir_respuestas(registro: dict, nuevas: dict, clave: dict[int, str]) -> list[int]:
+    """
+    Corrección a mano de una mala lectura: cambia las respuestas de una hoja
+    ya calificada y recalcula sus aciertos con la clave del examen.
+
+    registro: el de notas_<examen>.json (se modifica aquí mismo).
+    nuevas:   {pregunta: letra o None (en blanco)} con la lectura corregida.
+    Devuelve las preguntas que cambiaron ([] = no se tocó nada).
+
+    Se corrigen las RESPUESTAS y no la nota, porque los reportes vuelven a
+    contar los aciertos desde las respuestas guardadas: así la nota queda
+    igual en la app, en la planilla y en los reportes.
+    """
+    antes = {str(q): v for q, v in (registro.get("respuestas") or {}).items()}
+    despues = dict(antes)
+    despues.update({str(q): (v or None) for q, v in nuevas.items()})
+    cambiadas = sorted(int(q) for q, v in despues.items() if v != antes.get(q))
+    if not cambiadas:
+        return []
+    registro["respuestas"] = {q: despues[q] for q in sorted(despues, key=int)}
+    registro["aciertos"] = sum(1 for q, v in despues.items()
+                               if v is not None and v == clave.get(int(q)))
+    registro["respuestas_corregidas"] = sorted(
+        set(registro.get("respuestas_corregidas") or []) | set(cambiadas))
+    # Lo que ya revisó el docente deja de ser una alerta
+    alertas = dict(registro.get("alertas") or {})
+    for tipo in ("doble", "dudosas", "tenues"):
+        if tipo in alertas:
+            alertas[tipo] = [q for q in alertas[tipo] if q not in cambiadas]
+    alertas = {k: v for k, v in alertas.items() if v}
+    if alertas:
+        registro["alertas"] = alertas
+    else:
+        registro.pop("alertas", None)
+    return cambiadas

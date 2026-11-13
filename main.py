@@ -3008,9 +3008,16 @@ class GaleriaHojas(_VentanaSinRastro):
             self.btn_quitar = BotonIcono("borrar", peligro=True, size=(dp(48), dp(48)))
         self.btn_quitar.bind(on_release=lambda *_: self._quitar())
         fila.add_widget(self.btn_quitar)
-        self.btn_codigo = Factory.BotonSuave(text="Corregir código", font_size="14sp")
+        self.btn_codigo = Factory.BotonSuave(text="Corregir\ncódigo", font_size="13sp",
+                                             halign="center", line_height=0.95)
         self.btn_codigo.bind(on_release=lambda *_: self._corregir())
         fila.add_widget(self.btn_codigo)
+        # Mala lectura de una burbuja: se cambia la respuesta y la nota se recalcula
+        self.btn_respuestas = Factory.BotonSuave(text="Corregir\nrespuestas",
+                                                 font_size="13sp", halign="center",
+                                                 line_height=0.95)
+        self.btn_respuestas.bind(on_release=lambda *_: self._corregir_respuestas())
+        fila.add_widget(self.btn_respuestas)
         if modo == "historial":
             btn_listo = Factory.BotonOutline(text="Listo", font_size="14sp", size_hint_x=0.6)
             btn_listo.bind(on_release=lambda *_: self.dismiss())
@@ -3112,9 +3119,10 @@ class GaleriaHojas(_VentanaSinRastro):
         n = nota_local(r["aciertos"], r["total"])
         col = VERDE if n >= 6.0 else ROJO
         nombre = self._lista.get(codigo, "")
+        a_mano = "  ·  corregida a mano" if r.get("respuestas_corregidas") else ""
         extra = (f"\n{gris}[color={AMBAR}]Reemplaza la hoja que ya tenía guardada"
                  f"[/color][/color][/size]" if estado == "reemplaza" else
-                 f"\n{gris}{r['aciertos']} de {r['total']} correctas[/color][/size]")
+                 f"\n{gris}{r['aciertos']} de {r['total']} correctas{a_mano}[/color][/size]")
         # Dobles marcas, marcas débiles o fuera del examen: conviene mirar la hoja
         alertas = texto_alertas(r)
         if alertas:
@@ -3139,6 +3147,7 @@ class GaleriaHojas(_VentanaSinRastro):
         ultima = i >= total - 1
         self.btn_der.opacity, self.btn_der.disabled = (0, True) if ultima else (1, False)
         self.btn_codigo.disabled = estado in ("error", "descartada")
+        self.btn_respuestas.disabled = estado in ("error", "descartada")
         if self.modo == "revisar":
             self.btn_quitar.text = "Recuperar" if i in self.descartadas else "Descartar"
             quedan = len(self._conservadas())
@@ -3177,6 +3186,16 @@ class GaleriaHojas(_VentanaSinRastro):
             self.pantalla._pedir_codigo(r, _guardar)
         else:
             self.pantalla._editar_codigo(r, listo=self._recargar)
+
+    def _corregir_respuestas(self):
+        r = self._actual()
+        if r is None:
+            return
+        if self.modo == "revisar":
+            # Aún sin guardar: se cambia en memoria y se guarda al Confirmar
+            self.pantalla._editar_respuestas(r, listo=self._actualizar, guardar=False)
+        else:
+            self.pantalla._editar_respuestas(r, listo=self._recargar)
 
     def _recargar(self):
         """Modo historial: tras corregir o eliminar, vuelve a leer las hojas
@@ -3234,6 +3253,107 @@ class GaleriaHojas(_VentanaSinRastro):
             self.carrusel.load_next()
             return True
         return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cámara: vista previa que busca EN VIVO las 4 marcas de la hoja
+# ─────────────────────────────────────────────────────────────────────────────
+CAM_VERDE = (0.18, 0.75, 0.30, 1)
+CAM_AMBAR = (1.0, 0.70, 0.0, 1)
+CAM_LADO_ANALISIS = 720      # px del lado mayor de los cuadros que se analizan
+CAM_ESPERA_ANALISIS = 5.0    # s sin recibir cuadros -> se sigue sin la ayuda en vivo
+_CLASE_VISTA_CAMARA = None
+
+
+def _clase_vista_camara():
+    """
+    Vista previa de camera4kivy que, mientras encuadras, busca las 4 marcas
+    negras de la hoja y las señala. Es solo una ayuda para tomar la foto con
+    confianza: la foto se califica después exactamente igual que siempre.
+    (Se crea aquí adentro porque camera4kivy solo existe en el celular.)
+    """
+    global _CLASE_VISTA_CAMARA
+    if _CLASE_VISTA_CAMARA is not None:
+        return _CLASE_VISTA_CAMARA
+    from camera4kivy import Preview  # type: ignore
+    from kivy.clock import mainthread
+
+    class VistaCamara(Preview):
+        formato = None        # formato de la hoja del examen (layout_hoja)
+        al_estado = None      # función(completo: bool, vistas: int), en la interfaz
+        cuadros = 0           # cuadros analizados (0 = el celular no los entrega)
+        _puntos = ()          # marcas vistas, en coordenadas de pantalla
+        _lado = 0.0
+        _completo = False
+        _fallos = 0
+        _turno = 0
+
+        def analyze_pixels_callback(self, pixels, image_size, image_pos,
+                                    image_scale, mirror):
+            """camera4kivy lo llama en otro hilo con un cuadro reducido (RGBA);
+            mientras este trabaja, los cuadros siguientes se descartan."""
+            try:
+                import numpy as np
+                import cv2
+                import lector_omr as L
+                w, h = int(image_size[0]), int(image_size[1])
+                rgba = np.frombuffer(pixels, np.uint8).reshape(h, w, 4)
+                gris = cv2.cvtColor(rgba, cv2.COLOR_RGBA2GRAY)
+                self._turno += 1
+                # El intento "a fondo" (más lento) va en un cuadro de cada dos
+                cuatro, sueltas = L.marcas_en_vivo(gris, self.formato,
+                                                   a_fondo=self._turno % 2 == 0)
+                self.cuadros += 1
+                if cuatro is None:
+                    self._fallos += 1
+                    # Un cuadro movido no apaga el verde: hacen falta tres seguidos
+                    if self._completo and self._fallos <= 2:
+                        return
+                    pts = [(float(x), float(y)) for x, y in sueltas]
+                    lado = 0.045 * max(w, h)
+                else:
+                    self._fallos = 0
+                    pts = [(float(x), float(y)) for x, y in cuatro]
+                    lados = [np.hypot(pts[i][0] - pts[(i + 1) % 4][0],
+                                      pts[i][1] - pts[(i + 1) % 4][1]) for i in range(4)]
+                    lado = max(0.03 * max(w, h), 0.09 * min(lados))
+                try:
+                    sx, sy = float(image_scale[0]), float(image_scale[1])
+                except TypeError:
+                    sx = sy = float(image_scale)
+                # Del cuadro (origen arriba) a la pantalla de Kivy (origen abajo)
+                en_pantalla = []
+                for x, y in pts:
+                    y = h - y
+                    if mirror:
+                        x = w - x
+                    en_pantalla.append((x * sx + image_pos[0], y * sy + image_pos[1]))
+                self._publicar(en_pantalla, lado * sx, cuatro is not None)
+            except Exception:
+                pass
+
+        @mainthread
+        def _publicar(self, puntos, lado, completo):
+            if not getattr(self, "camera_connected", True):
+                puntos, completo = [], False
+            self._puntos, self._lado, self._completo = puntos, lado, completo
+            if self.al_estado is not None:
+                self.al_estado(completo, len(puntos))
+
+        def canvas_instructions_callback(self, texture, tex_size, tex_pos):
+            """camera4kivy lo llama al dibujar cada cuadro de la vista previa."""
+            puntos, lado = self._puntos, self._lado
+            if not puntos:
+                return
+            Color(*(CAM_VERDE if self._completo else CAM_AMBAR))
+            for x, y in puntos:
+                Line(rectangle=(x - lado / 2, y - lado / 2, lado, lado), width=dp(2))
+            if self._completo and len(puntos) == 4:
+                borde = [c for p in list(puntos) + [puntos[0]] for c in p]
+                Line(points=borde, width=dp(1.2))
+
+    _CLASE_VISTA_CAMARA = VistaCamara
+    return VistaCamara
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3385,9 +3505,10 @@ class CalificarScreen(Screen):
             # Doble marca, marca débil o fuera del examen: conviene mirar la hoja
             ojo = (f"   [size=12sp][color={AMBAR}]mira la hoja[/color][/size]"
                    if texto_alertas(r) else "")
+            a_mano = "  ·  corregida a mano" if r.get("respuestas_corregidas") else ""
             texto = (f"[b]Código {codigo}[/b]   [color={col}][b]{n:.1f}[/b][/color]{ojo}\n"
                      f"[size=12.5sp][color={GRIS_HEX}]{nombre}{r['aciertos']} de "
-                     f"{r['total']} correctas[/color][/size]")
+                     f"{r['total']} correctas{a_mano}[/color][/size]")
         fila = Tarjeta(orientation="horizontal", size_hint_y=None, height=dp(64),
                        padding=[dp(16), dp(8), dp(10), dp(8)], spacing=dp(8),
                        radio=dp(14), sombra=False)
@@ -3681,6 +3802,131 @@ class CalificarScreen(Screen):
             self._borrar_imagen(e)
         self._escribir_notas(data)
 
+    # ── Corregir una mala lectura (respuestas) ────────────────────────────────
+    def _editar_respuestas(self, r, listo=None, guardar=True):
+        """
+        Ventana para corregir, pregunta por pregunta, lo que leyó el lector
+        en una hoja. La nota se recalcula sola con la clave del examen.
+
+        guardar=True: hoja ya guardada, el cambio se escribe al momento.
+        guardar=False: hoja recién calificada (sin confirmar), solo en memoria.
+        listo(): se llama después de aplicar un cambio.
+        """
+        import lector_omr as L
+        if not r.get("respuestas"):
+            aviso("No se puede corregir aquí",
+                  "Esta hoja se calificó con una versión anterior y no guardó sus "
+                  "respuestas. Quítala y vuelve a tomarle la foto.")
+            return
+        try:
+            clave = L.cargar_datos_examen(self._mapa_claves[self.examen]).clave
+        except Exception as e:
+            aviso("Hay un problema con este examen",
+                  f"No pudimos leer sus respuestas correctas:\n{e}")
+            return
+
+        leidas = {int(q): v for q, v in r["respuestas"].items()}
+        elegidas = dict(leidas)
+        alertas = r.get("alertas") or {}
+        motivos = {}
+        for tipo, texto in (("doble", "doble marca"), ("dudosas", "marca débil"),
+                            ("tenues", "marca muy clara")):
+            for q in alertas.get(tipo) or []:
+                motivos[q] = texto
+        ambar = (0.878, 0.608, 0.0, 1)
+
+        cont = BoxLayout(orientation="vertical", spacing=dp(8),
+                         padding=[dp(6), dp(8), dp(6), dp(4)])
+        ayuda = ("Toca la letra que de verdad marcó el estudiante "
+                 "(\u2013 = la dejó en blanco).")
+        if motivos:
+            ayuda += " En ámbar, las que el lector vio dudosas."
+        lbl_ayuda = Label(text=ayuda, size_hint_y=None, height=dp(38), font_size="13sp",
+                          color=GRIS, halign="left", valign="middle")
+        lbl_ayuda.bind(size=lambda i, *_: setattr(i, "text_size", i.size))
+        cont.add_widget(lbl_ayuda)
+
+        lbl_nota = Label(markup=True, size_hint_y=None, height=dp(26), font_size="15sp",
+                         halign="left", valign="middle")
+        lbl_nota.bind(size=lambda i, *_: setattr(i, "text_size", i.size))
+        cont.add_widget(lbl_nota)
+
+        def _contar():
+            aciertos = sum(1 for q, v in elegidas.items()
+                           if v is not None and v == clave.get(q))
+            total = r.get("total") or len(elegidas)
+            n = nota_local(aciertos, total)
+            cambios = sum(1 for q in elegidas if elegidas[q] != leidas[q])
+            col = VERDE if n >= 6.0 else ROJO
+            lbl_nota.text = (f"[b]{aciertos} de {total} correctas[/b]   "
+                             f"[color={col}][b]{n:.1f}[/b][/color]"
+                             + (f"   [size=13sp][color={GRIS_HEX}]{cambios} cambio"
+                                f"{'s' if cambios != 1 else ''}[/color][/size]"
+                                if cambios else ""))
+            btn_ok.disabled = not cambios
+
+        lista = BoxLayout(orientation="vertical", spacing=dp(6), size_hint_y=None,
+                          padding=[0, 0, 0, dp(6)])
+        lista.bind(minimum_height=lista.setter("height"))
+        opciones = ("A", "B", "C", "D", None)
+        for q in sorted(elegidas):
+            fila = Tarjeta(orientation="horizontal", size_hint_y=None, height=dp(56),
+                           padding=[dp(8), dp(7)], spacing=dp(6), radio=dp(14),
+                           sombra=False)
+            etq = Label(text=str(q), size_hint_x=None, width=dp(32), bold=True,
+                        color=ambar if q in motivos else GRIS,
+                        halign="center", valign="middle")
+            fila.add_widget(_ajustar_texto(etq))
+            grupo = []
+            for letra in opciones:
+                btn = OpcionLetra(text=letra or "\u2013")
+                btn.letra = letra
+                btn.marcar(elegidas[q] == letra)
+                grupo.append(btn)
+                fila.add_widget(btn)
+
+            def _elegir(inst, q=q, grupo=grupo):
+                elegidas[q] = inst.letra
+                for b in grupo:
+                    b.marcar(b is inst)
+                _contar()
+            for btn in grupo:
+                btn.bind(on_release=_elegir)
+            lista.add_widget(fila)
+        scroll = ScrollView(bar_width=dp(3))
+        scroll.add_widget(lista)
+        cont.add_widget(scroll)
+
+        botones = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(8))
+        btn_no = Factory.BotonOutline(text="Cancelar", size_hint_x=0.45)
+        btn_ok = Factory.BotonAccion(text="Guardar cambios")
+        botones.add_widget(btn_no)
+        botones.add_widget(btn_ok)
+        cont.add_widget(botones)
+        pop = Popup(title=f"Corregir respuestas  ·  código {r.get('codigo', '???')}",
+                    content=cont, size_hint=(0.96, 0.92))
+        btn_no.bind(on_release=lambda *_: pop.dismiss())
+
+        def _ok(*_):
+            pop.dismiss()
+            nuevas = {str(q): v for q, v in elegidas.items()}
+            if guardar:
+                # Se corrige el registro guardado (y también el que está en pantalla)
+                datos = self._leer_notas()
+                for e in datos:
+                    if e.get("archivo") == r.get("archivo"):
+                        L.corregir_respuestas(e, nuevas, clave)
+                self._escribir_notas(datos)
+            L.corregir_respuestas(r, nuevas, clave)
+            if guardar:
+                self.construir()
+            if listo:
+                listo()
+
+        btn_ok.bind(on_release=_ok)
+        _contar()
+        pop.open()
+
     # ── Cámara (solo Android / iOS) ───────────────────────────────────────────
     def _ruta_captura(self):
         """Carpeta donde la cámara guardará la foto. En Android usa la carpeta
@@ -3745,24 +3991,64 @@ class CalificarScreen(Screen):
 
     def _abrir_camara_c4k(self):
         """Cámara integrada con camera4kivy (CameraX): vista previa en vivo
-        dentro de la app + botón de captura."""
+        dentro de la app + botón de captura. Mientras encuadras, señala las 4
+        marcas negras de la hoja (ver _clase_vista_camara)."""
         try:
-            from camera4kivy import Preview  # type: ignore
+            VistaCamara = _clase_vista_camara()
         except Exception as e:
             aviso("Cámara", "No pudimos iniciar la cámara: %s\n\n"
                   "Mientras tanto, puedes usar 'Desde la galería'." % e)
             return
         try:
             cont = FloatLayout()
-            self._preview = Preview(aspect_ratio="4:3",
-                                    size_hint=(1, 1), pos_hint={"x": 0, "y": 0})
+            self._preview = VistaCamara(aspect_ratio="4:3",
+                                        size_hint=(1, 1), pos_hint={"x": 0, "y": 0})
+            try:
+                self._preview.formato = next(
+                    f for _, nom, _n, f, _h in listar_examenes(App.get_running_app().ruta_curso)
+                    if nom == self.examen)
+            except Exception:
+                self._preview.formato = None
             cont.add_widget(self._preview)
+
+            # Estado de la búsqueda de marcas, encima del botón de captura
+            lbl = Label(text="Buscando las 4 marcas negras\u2026", size_hint=(None, None),
+                        size=(dp(300), dp(38)), pos_hint={"center_x": 0.5, "y": 0.15},
+                        color=BLANCO, bold=True, font_size="14sp",
+                        halign="center", valign="middle")
+            with lbl.canvas.before:
+                Color(0, 0, 0, 0.6)
+                fondo = RoundedRectangle(pos=lbl.pos, size=lbl.size, radius=[dp(19)])
+            lbl.bind(pos=lambda i, v: setattr(fondo, "pos", v),
+                     size=lambda i, v: setattr(fondo, "size", v))
+            cont.add_widget(lbl)
 
             btn_cap = Factory.BotonAccion(text="Tomar foto", size_hint=(None, None),
                                           size=(dp(180), dp(60)),
                                           pos_hint={"center_x": 0.5, "y": 0.03})
             btn_cap.bind(on_release=lambda *_: self._preview.capture_photo(location="private"))
             cont.add_widget(btn_cap)
+            dorado = (tuple(btn_cap.color_fondo), tuple(btn_cap.color_fondo_down),
+                      tuple(btn_cap.color))
+            ultimo = [None]
+
+            def _estado(completo, vistas):
+                """Texto y color según lo que se ve (el botón nunca se bloquea)."""
+                if (completo, vistas) == ultimo[0]:
+                    return
+                ultimo[0] = (completo, vistas)
+                if completo:
+                    lbl.text = "Se ven las 4 marcas: toma la foto"
+                    lbl.color = (0.62, 1, 0.66, 1)
+                    btn_cap.color_fondo = (0.18, 0.62, 0.25, 1)
+                    btn_cap.color_fondo_down = (0.13, 0.50, 0.20, 1)
+                    btn_cap.color = BLANCO
+                    return
+                lbl.color = BLANCO
+                lbl.text = ("Buscando las 4 marcas negras\u2026" if not vistas else
+                            f"Veo {vistas} de 4 marcas: muestra la hoja completa")
+                btn_cap.color_fondo, btn_cap.color_fondo_down, btn_cap.color = dorado
+            self._preview.al_estado = _estado
 
             btn_x = BotonCerrar(size_hint=(None, None), size=(dp(52), dp(52)),
                                 pos_hint={"right": 0.97, "top": 0.97})
@@ -3773,11 +4059,44 @@ class CalificarScreen(Screen):
             self._popup_cam = Popup(title="Encuadra la hoja completa", content=cont,
                                     size_hint=(1, 1), auto_dismiss=False)
             btn_x.bind(on_release=lambda *_: self._popup_cam.dismiss())
-            self._popup_cam.bind(
-                on_open=lambda *_: self._preview.connect_camera(
-                    camera_id="back", filepath_callback=self._foto_c4k,
-                    enable_video=False),
-                on_pre_dismiss=lambda *_: self._desconectar_c4k())
+            vista, popup = self._preview, self._popup_cam
+
+            def _conectar(*_):
+                try:
+                    vista.connect_camera(
+                        camera_id="back", filepath_callback=self._foto_c4k,
+                        enable_video=False, enable_analyze_pixels=True,
+                        analyze_pixels_resolution=CAM_LADO_ANALISIS)
+                except Exception:
+                    _sin_analisis()
+                    return
+                self._vigia_cam = Clock.schedule_once(_vigilar, CAM_ESPERA_ANALISIS)
+
+            def _vigilar(_dt):
+                # Hay celulares que no pueden dar vista previa + foto + análisis
+                # a la vez: si no llegó ningún cuadro, se sigue como antes.
+                if vista.cuadros == 0 and self._popup_cam is popup and vista is self._preview:
+                    try:
+                        vista.disconnect_camera()
+                    except Exception:
+                        pass
+                    Clock.schedule_once(lambda dt: _sin_analisis(), 0.3)
+
+            def _sin_analisis():
+                vista.al_estado = None
+                lbl.text = "Encuadra la hoja con sus 4 marcas negras"
+                lbl.color = BLANCO
+                try:
+                    vista.connect_camera(camera_id="back",
+                                         filepath_callback=self._foto_c4k,
+                                         enable_video=False)
+                except Exception as e:
+                    popup.dismiss()
+                    aviso("Cámara", "No pudimos iniciar la cámara: %s\n\n"
+                          "Mientras tanto, puedes usar 'Desde la galería'." % e)
+
+            self._popup_cam.bind(on_open=_conectar,
+                                 on_pre_dismiss=lambda *_: self._desconectar_c4k())
             self._popup_cam.open()
         except Exception as e:
             import traceback
@@ -3785,7 +4104,12 @@ class CalificarScreen(Screen):
                   % (e, traceback.format_exc()))
 
     def _desconectar_c4k(self):
+        vigia = getattr(self, "_vigia_cam", None)
+        if vigia is not None:
+            vigia.cancel()
+            self._vigia_cam = None
         try:
+            self._preview.al_estado = None
             self._preview.disconnect_camera()
         except Exception:
             pass
