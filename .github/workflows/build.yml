@@ -47,6 +47,21 @@ jobs:
           key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
           restore-keys: buildozer-${{ runner.os }}-
 
+      # Firma FIJA: sin esto, cada compilación firma el APK con una clave nueva
+      # y Android no deja instalarlo encima de la versión anterior (habría que
+      # desinstalar y se perderían los datos). La clave está en el secreto
+      # ANDROID_DEBUG_KEYSTORE (copia local en firma/, fuera del repositorio).
+      - name: Usar la firma fija del APK
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_DEBUG_KEYSTORE }}
+        run: |
+          if [ -z "$KEYSTORE" ]; then
+            echo "::warning::Falta el secreto ANDROID_DEBUG_KEYSTORE: el APK sale con una firma nueva"
+            exit 0
+          fi
+          mkdir -p ~/.android
+          echo "$KEYSTORE" | base64 -d > ~/.android/debug.keystore
+
       - name: Compilar con Buildozer
         run: buildozer -v android debug
 

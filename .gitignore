@@ -12,3 +12,6 @@ pruebas/hoja_mayor/
 # Fotos reales de hojas de estudiantes (datos personales): nunca al repositorio
 pruebas/grapas/reales/
 pruebas/grapas/resultado/
+# Clave de firma del APK (copia local; en GitHub está como secreto)
+firma/
+*.keystore
