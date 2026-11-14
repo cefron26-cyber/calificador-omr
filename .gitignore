@@ -9,3 +9,6 @@ bin/
 # Se generan con pruebas/generar_pruebas.py y pruebas/verificar_hoja_mayor.py
 pruebas/fotos/
 pruebas/hoja_mayor/
+# Fotos reales de hojas de estudiantes (datos personales): nunca al repositorio
+pruebas/grapas/reales/
+pruebas/grapas/resultado/

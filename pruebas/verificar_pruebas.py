@@ -42,7 +42,9 @@ def diseno(c):
     cod = c["codigo"]
     codigo = cod if isinstance(cod, str) else ("???" if cod is None else cod[1] + "?")
     return dict(codigo=codigo, aciertos=aciertos, blanco=sorted(blanco), doble=sorted(doble),
-                dudosas=sorted(dudosas), tenues=sorted(tenues), error=c["esquina_rota"])
+                # La esquina rota (hoja 19) antes no se leía; desde que el lector
+                # comprueba el calce de la cuadrícula, media marca basta y se lee bien
+                dudosas=sorted(dudosas), tenues=sorted(tenues), error=False)
 
 
 def leer(ruta):

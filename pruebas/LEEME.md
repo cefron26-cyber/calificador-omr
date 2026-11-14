@@ -29,11 +29,47 @@ fotos por el lector y por el flujo de la app (Calificar → galería → Confirm
    | A | C | B | D | B | A | D | C | A | B | C | D | D | C | B | A | B | D | A | C |
 
 4. **Calificar → Desde la galería**: elige **todas las fotos menos la 15**.
-   - Resumen esperado: **19 hojas · 15 bien · 3 por revisar · 1 sin leer**.
-   - Toca **Revisar y confirmar**. La galería muestra primero la 19 (sin leer), luego 12, 13 y 14 (por revisar) y después las demás por código.
-   - Toca **Confirmar y guardar (18)**.
-5. Ahora carga **solo la foto 15** (otra hoja del alumno 001). La galería dice
+   - Resumen esperado: **19 hojas · 16 bien · 3 por revisar**.
+   - Toca **Revisar y confirmar**. La galería muestra primero 12, 13 y 14 (por revisar) y después las demás por código.
+   - Toca **Confirmar y guardar (19)**.
+5. Ahora carga **solo la foto 15** (otra hoja del alumno 001). Las dos se leen
+   igual de bien (sin avisos), así que gana la más reciente: la galería dice
    **"Reemplaza la hoja que ya tenía guardada"**. Al confirmar, el 001 queda con **6.5** (antes 10.0).
+6. **Calificar a mano una hoja que no se lee**: carga una foto donde no esté la
+   hoja (por ejemplo, de la mesa). Sale **"No pudimos leerla · Mira la foto y
+   califícala a mano"**. Toca **Corregir respuestas** (la foto sale arriba y se
+   amplía con dos dedos), marca las letras y guarda; luego **Corregir código**.
+   Ya completa, sale con su nota y "calificada a mano", y se guarda al confirmar.
+   Si la dejas a medias, queda en la lista ("No pudimos leerla") y la terminas
+   con **Ver**.
+
+### Fotos repetidas del mismo alumno
+
+Si hay dos fotos del mismo alumno (en la misma tanda o una ya guardada), se
+queda la **mejor leída**: la que tiene menos preguntas sin marcar (en blanco,
+doble marca o marca débil) y menos marcas muy claras. No se mira la nota. Si
+quedan iguales, se queda la **más reciente**. Una hoja que corregiste a mano
+le gana siempre a una lectura automática. La galería lo dice en cada foto:
+"Hay otra foto de este alumno mejor leída: se guardará esa" o "Ya hay una hoja
+guardada de este alumno mejor leída: se conserva esa".
+
+### Hojas engrapadas (`grapas/`)
+
+Una grapa sobre la marca de arriba a la izquierda hacía que el lector tomara el
+cuadrito de orientación como esquina: la cuadrícula quedaba corrida una fila y
+la nota salía mal **sin avisar**. Ahora:
+
+1. borra lo delgado pegado a las marcas (la grapa) y vuelve a buscarlas;
+2. si la marca sigue tapada, la reconstruye con los otros 4 puntos de la hoja
+   (3 esquinas + el cuadrito de orientación);
+3. solo acepta unas esquinas si los círculos de la hoja calzan con la foto; si
+   aun así calzan poco, la hoja sale con el aviso **"la cuadrícula no calzó
+   bien, revisa las respuestas"**.
+
+- `grapas/reales/`: 4 fotos reales de 6.°4 (examen de inglés, 30 preguntas, clave de `Claves_6th_1-30.docx`).
+- `grapas/fotos/`: 10 fotos simuladas (grapa en diagonal, horizontal, entre la marca y el cuadrito, brillante, de lado, de cabeza, poco tóner, sombra, otra esquina, dos grapas). Se crean con `python pruebas/generar_grapas.py`; `grapas/hojas_grapas.pdf` son las mismas hojas para imprimir y engrapar a mano.
+- `python pruebas/verificar_grapas.py` las califica y compara pregunta por pregunta (deja las hojas marcadas en `grapas/resultado/`).
+- `python pruebas/verificar_a_mano.py` prueba la calificación a mano y las fotos repetidas, sin abrir la app.
 
 ## Resultados esperados
 
@@ -61,7 +97,7 @@ es lo que dice la tarjeta de la galería y la fila de la lista.
 | 16 | Foto de cabeza (180°) | 012 | 17/20 | **8.5** | — | Luis Fernando Arias |
 | 17 | Foto de lado (90°) | 013 | 19/20 | **9.5** | — | Mariana Torres Vélez |
 | 18 | Sombra fuerte y foto inclinada | 014 | 15/20 | **7.5** | — | Nicolás Restrepo Cano |
-| 19 | Esquina rota: falta una marca negra | — | — | **error** | — | rojo: "No pudimos leerla · No se vieron las 4 marcas negras…" (no se guarda) |
+| 19 | Esquina rota: falta media marca negra | 015 | 20/20 | **10.0** | — | Olga Lucía Prieto (antes no se leía; con media marca ya basta) |
 | 20 | Hoja en blanco (solo el código) | 016 | 0/20 | **1.0** | Sin resp: 1 a 20 | Pablo Andrés Duque |
 
 Para probar la corrección de códigos: en la 12 pon **015** y en la 13 pon **004**.

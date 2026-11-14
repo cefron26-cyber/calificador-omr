@@ -1396,6 +1396,8 @@ def texto_alertas(r):
     def nums(v):
         return ", ".join(str(x) for x in v[:4]) + ("…" if len(v) > 4 else "")
     partes = []
+    if a.get("cuadricula"):
+        partes.append("la cuadrícula no calzó bien, revisa las respuestas")
     if a.get("doble"):
         partes.append(f"doble marca en {nums(a['doble'])}")
     if a.get("dudosas"):
@@ -1528,7 +1530,9 @@ def borrar_fotos_examenes(viejos):
         if e["notas_json"] is not None:
             datos = json.loads(e["notas_json"].read_text(encoding="utf-8"))
             for r in datos:
-                if r.pop("imagen", None):
+                # (las calificadas a mano solo tienen la foto original)
+                tenia = bool(r.pop("imagen", None)) | bool(r.pop("foto_original", None))
+                if tenia:
                     r["foto_borrada"] = True
             e["notas_json"].write_text(json.dumps(datos, indent=2, ensure_ascii=False),
                                        encoding="utf-8")
@@ -2937,6 +2941,11 @@ class ClavesScreen(Screen):
 # ─────────────────────────────────────────────────────────────────────────────
 # GALERÍA DE HOJAS  ·  revisar deslizando, antes o después de guardar
 # ─────────────────────────────────────────────────────────────────────────────
+# Estados (GaleriaHojas._estado) de las hojas que NO quedan guardadas al Confirmar
+NO_SE_GUARDAN = ("error", "descartada", "tapada", "tapada_igual", "queda_guardada",
+                 "falta_codigo", "falta_respuestas")
+
+
 class GaleriaHojas(_VentanaSinRastro):
     """
     Hojas calificadas a pantalla completa: se pasa de una a otra deslizando
@@ -3039,7 +3048,8 @@ class GaleriaHojas(_VentanaSinRastro):
     def _armar(self, inicio=0):
         self.carrusel.clear_widgets()
         for r in self.hojas:
-            if r.get("imagen"):
+            # Hoja sin leer: se muestra la foto original, para calificarla a mano
+            if r.get("imagen") or self.pantalla._ruta_original(r):
                 img = Image(fit_mode="contain")
             else:
                 # Sin imagen (no se pudo leer, o se borró para liberar espacio)
@@ -3072,44 +3082,93 @@ class GaleriaHojas(_VentanaSinRastro):
         self._actualizar()
 
     def _textura(self, r):
-        if not r.get("imagen"):
-            return None
         import lector_omr as L
-        img = L.leer_imagen(self._carpeta / r["imagen"])
+        if r.get("imagen"):
+            ruta = self._carpeta / r["imagen"]
+        else:
+            ruta = self.pantalla._ruta_original(r)
+            if ruta is None:
+                return None
+        img = L.leer_imagen(ruta)
         return None if img is None else CalificarScreen._np_a_textura(img)
 
     # ── Estado y textos ──────────────────────────────────────────────────────
+    @staticmethod
+    def _estado_manual(r):
+        """Hoja que el lector no pudo leer y que se califica a mano:
+        'error' (aún no se ha hecho nada), 'falta_codigo', 'falta_respuestas'
+        u 'ok' (ya tiene las dos cosas y se puede guardar)."""
+        sin_codigo = str(r.get("codigo")) == "ERROR"
+        if sin_codigo and not r.get("a_mano"):
+            return "error"
+        if sin_codigo:
+            return "falta_codigo"
+        if not r.get("a_mano"):
+            return "falta_respuestas"
+        return "ok"
+
     def _estado(self, i):
         r = self.hojas[i]
         if self.modo == "historial":
+            if r.get("sin_leer"):
+                return self._estado_manual(r)
             import registro_notas as RN
             repetidos = RN.detectar_conflictos(self.pantalla._leer_notas())
             return self.pantalla._estado_hoja(r, repetidos, self._lista)
         if i in self.descartadas:
             return "descartada"
+        if r.get("sin_leer"):
+            estado = self._estado_manual(r)
+            if estado != "ok":
+                return estado
+            r = dict(r, sin_leer=False)       # ya completa: se evalúa como las demás
         estado = self.pantalla._estado_hoja(r, set(), self._lista)
         if estado != "ok":
             return estado
+        # Varias fotos del mismo alumno (en esta tanda o ya guardada): se queda
+        # la mejor leída (menos avisos); si quedan iguales, la más reciente.
+        import lector_omr as L
         cod = str(r.get("codigo"))
-        # Dos fotos del mismo alumno en esta tanda: se guarda la última
-        if any(j > i and j not in self.descartadas and str(o.get("codigo")) == cod
-               for j, o in enumerate(self.hojas)):
-            return "tapada"
-        if any(str(g.get("codigo")) == cod for g in self.pantalla._leer_notas()):
-            return "reemplaza"
+        mia = L.calidad_lectura(r)
+        for j, o in enumerate(self.hojas):
+            if j == i or j in self.descartadas or str(o.get("codigo")) != cod:
+                continue
+            if o.get("sin_leer") and self._estado_manual(o) != "ok":
+                continue      # calificada a mano a medias: aún no se guardaría
+            otra = L.calidad_lectura(o)
+            if otra > mia or (otra == mia and j > i):
+                return "tapada" if otra > mia else "tapada_igual"
+        guardadas = [L.calidad_lectura(g) for g in self.pantalla._leer_notas()
+                     if str(g.get("codigo")) == cod and g.get("archivo") != r.get("archivo")]
+        if guardadas:
+            return "reemplaza" if mia >= max(guardadas) else "queda_guardada"
         return "ok"
 
     def _texto(self, r, estado):
         codigo = str(r.get("codigo", "???"))
         gris = f"[size=13sp][color={GRIS_HEX}]"
         if estado == "error":
+            if r.get("sin_leer") and r.get("foto_original"):
+                return (f"[color={ROJO}][b]No pudimos leerla[/b][/color]\n{gris}"
+                        f"Mira la foto y califícala a mano: corrige el código y "
+                        f"las respuestas.[/color][/size]")
             return (f"[color={ROJO}][b]No pudimos leerla[/b][/color]\n{gris}"
                     f"No se guardará. Abajo dice por qué.[/color][/size]")
+        if estado == "falta_codigo":
+            return (f"[color={AMBAR}][b]Calificada a mano  ·  {r['aciertos']} de "
+                    f"{r['total']}[/b][/color]\n{gris}Falta el código: tócalo en "
+                    f"Corregir código[/color][/size]")
         avisos = {
             "ilegible": "No se lee bien el código: corrígelo",
             "repetido": "Código repetido: revisa cuál es el correcto",
             "fuera": "No está en la lista del curso: revísalo",
-            "tapada": "Hay otra foto de este alumno más adelante: se guardará esa",
+            "tapada": "Hay otra foto de este alumno mejor leída: se guardará esa",
+            "tapada_igual": "Hay otra foto de este alumno igual de bien leída y más "
+                            "reciente: se guardará esa",
+            "queda_guardada": "Ya hay una hoja guardada de este alumno mejor leída: "
+                              "se conserva esa",
+            "falta_respuestas": "Falta marcar sus respuestas: tócalo en Corregir "
+                                "respuestas",
             "descartada": "Descartada: no se guardará",
         }
         if estado in avisos:
@@ -3119,9 +3178,11 @@ class GaleriaHojas(_VentanaSinRastro):
         n = nota_local(r["aciertos"], r["total"])
         col = VERDE if n >= 6.0 else ROJO
         nombre = self._lista.get(codigo, "")
-        a_mano = "  ·  corregida a mano" if r.get("respuestas_corregidas") else ""
-        extra = (f"\n{gris}[color={AMBAR}]Reemplaza la hoja que ya tenía guardada"
-                 f"[/color][/color][/size]" if estado == "reemplaza" else
+        a_mano = ("  ·  calificada a mano" if r.get("a_mano") else
+                  "  ·  corregida a mano" if r.get("respuestas_corregidas") else "")
+        extra = (f"\n{gris}[color={AMBAR}]Reemplaza la hoja que ya tenía guardada "
+                 f"(esta se lee mejor o igual)[/color][/color][/size]"
+                 if estado == "reemplaza" else
                  f"\n{gris}{r['aciertos']} de {r['total']} correctas{a_mano}[/color][/size]")
         # Dobles marcas, marcas débiles o fuera del examen: conviene mirar la hoja
         alertas = texto_alertas(r)
@@ -3146,18 +3207,30 @@ class GaleriaHojas(_VentanaSinRastro):
         self.btn_izq.opacity, self.btn_izq.disabled = (0, True) if i == 0 else (1, False)
         ultima = i >= total - 1
         self.btn_der.opacity, self.btn_der.disabled = (0, True) if ultima else (1, False)
-        self.btn_codigo.disabled = estado in ("error", "descartada")
-        self.btn_respuestas.disabled = estado in ("error", "descartada")
+        # Una hoja sin leer se puede calificar a mano si se guardó su foto
+        bloqueada = estado == "descartada" or (estado == "error" and not r.get("sin_leer"))
+        self.btn_codigo.disabled = bloqueada
+        self.btn_respuestas.disabled = bloqueada
         if self.modo == "revisar":
             self.btn_quitar.text = "Recuperar" if i in self.descartadas else "Descartar"
-            quedan = len(self._conservadas())
+            # Las que de verdad quedarán guardadas (no las tapadas por otra foto)
+            quedan = sum(1 for j in range(total)
+                         if self._estado(j) not in NO_SE_GUARDAN)
             self.btn_confirmar.text = (f"Confirmar y guardar ({quedan})" if quedan
                                        else "Confirmar (no se guarda ninguna)")
 
+    def _completa(self, r):
+        """Tiene código y respuestas: leída por el lector o calificada a mano."""
+        if r.get("sin_leer"):
+            return self._estado_manual(r) == "ok"
+        return r.get("codigo") != "ERROR"
+
     def _conservadas(self):
-        """Las hojas que se guardarían (no descartadas y con lectura)."""
+        """Las hojas que se mandan a guardar (no descartadas y con lectura o
+        calificadas a mano). Entre fotos del mismo alumno, _guardar_registros
+        se queda con la mejor leída."""
         return [r for j, r in enumerate(self.hojas)
-                if j not in self.descartadas and r.get("codigo") != "ERROR"]
+                if j not in self.descartadas and self._completa(r)]
 
     # ── Acciones ─────────────────────────────────────────────────────────────
     def _actual(self):
@@ -3178,11 +3251,13 @@ class GaleriaHojas(_VentanaSinRastro):
         r = self._actual()
         if r is None:
             return
-        if self.modo == "revisar":
+        if self.modo == "revisar" or r.get("sin_leer"):
+            # Aún sin guardar: se cambia en memoria. En 'revisar' se guarda al
+            # Confirmar; una hoja sin leer del historial, apenas esté completa.
             def _guardar(nuevo):
                 r["codigo"] = nuevo
                 r["codigo_corregido"] = True
-                self._actualizar()
+                self._tras_cambio_en_memoria(r)
             self.pantalla._pedir_codigo(r, _guardar)
         else:
             self.pantalla._editar_codigo(r, listo=self._recargar)
@@ -3191,11 +3266,18 @@ class GaleriaHojas(_VentanaSinRastro):
         r = self._actual()
         if r is None:
             return
-        if self.modo == "revisar":
-            # Aún sin guardar: se cambia en memoria y se guarda al Confirmar
-            self.pantalla._editar_respuestas(r, listo=self._actualizar, guardar=False)
+        if self.modo == "revisar" or r.get("sin_leer"):
+            self.pantalla._editar_respuestas(
+                r, listo=lambda: self._tras_cambio_en_memoria(r), guardar=False)
         else:
             self.pantalla._editar_respuestas(r, listo=self._recargar)
+
+    def _tras_cambio_en_memoria(self, r):
+        if self.modo == "revisar":
+            self._actualizar()
+        else:
+            # Hoja sin leer de esta sesión: se guarda al tener código y respuestas
+            self.pantalla._completar_a_mano(r, listo=self._recargar)
 
     def _recargar(self):
         """Modo historial: tras corregir o eliminar, vuelve a leer las hojas
@@ -3217,8 +3299,10 @@ class GaleriaHojas(_VentanaSinRastro):
         for r in descartadas:
             self.pantalla._borrar_imagen(r)
         self.dismiss()
+        # Sin leer (o calificadas a mano a medias): quedan en la lista de esta
+        # sesión, para terminarlas después con el botón Ver
         errores = [r for j, r in enumerate(self.hojas)
-                   if j not in self.descartadas and r.get("codigo") == "ERROR"]
+                   if j not in self.descartadas and not self._completa(r)]
         self.pantalla._confirmar_tanda(conservadas, errores)
 
     def _cerrar(self):
@@ -3382,9 +3466,10 @@ class CalificarScreen(Screen):
 
     @staticmethod
     def _estado_hoja(r, repetidos, lista):
-        """'error', 'ilegible', 'repetido', 'fuera' (no está en la lista) u 'ok'."""
+        """'error', 'ilegible', 'repetido', 'fuera' (no está en la lista) u 'ok'.
+        Una hoja sin leer que aún se está calificando a mano cuenta como 'error'."""
         codigo = str(r.get("codigo", "???"))
-        if codigo == "ERROR":
+        if codigo == "ERROR" or r.get("sin_leer"):
             return "error"
         if not codigo.isdigit():
             return "ilegible"
@@ -3483,6 +3568,8 @@ class CalificarScreen(Screen):
         estado = self._estado_hoja(r, repetidos, lista)
         if estado == "error":
             motivo = str(r.get("error") or r.get("archivo") or "")
+            if r.get("sin_leer") and r.get("foto_original"):
+                motivo = "Toca Ver para calificarla a mano"
             if len(motivo) > 42:
                 motivo = motivo[:40].rstrip() + "…"
             texto = (f"[color={ROJO}][b]No pudimos leerla[/b][/color]\n[size=12.5sp]"
@@ -3505,7 +3592,8 @@ class CalificarScreen(Screen):
             # Doble marca, marca débil o fuera del examen: conviene mirar la hoja
             ojo = (f"   [size=12sp][color={AMBAR}]mira la hoja[/color][/size]"
                    if texto_alertas(r) else "")
-            a_mano = "  ·  corregida a mano" if r.get("respuestas_corregidas") else ""
+            a_mano = ("  ·  calificada a mano" if r.get("a_mano") else
+                      "  ·  corregida a mano" if r.get("respuestas_corregidas") else "")
             texto = (f"[b]Código {codigo}[/b]   [color={col}][b]{n:.1f}[/b][/color]{ojo}\n"
                      f"[size=12.5sp][color={GRIS_HEX}]{nombre}{r['aciertos']} de "
                      f"{r['total']} correctas{a_mano}[/color][/size]")
@@ -3546,7 +3634,7 @@ class CalificarScreen(Screen):
 
     def _eliminar_hoja(self, r, listo=None):
         """Quita una hoja (preguntando). listo(): se llama después."""
-        if r.get("codigo") == "ERROR":
+        if r.get("codigo") == "ERROR" or r.get("sin_leer"):
             self.errores = [e for e in self.errores if e is not r]
             self.construir()
             if listo:
@@ -3699,25 +3787,57 @@ class CalificarScreen(Screen):
         """Agrega/actualiza registros en notas_<examen>.json (clave: archivo).
         Las hojas con ERROR no se guardan: no son una nota (se ven en pantalla).
 
-        Si llega otra hoja del mismo alumno, se queda la última: la anterior
-        y su imagen marcada se quitan. Solo con códigos legibles que estén en
-        la lista del curso (o cualquiera legible si aún no hay lista); un
-        código dudoso no pisa a nadie y queda 'por revisar'.
+        Si hay varias hojas del mismo alumno (en la tanda o ya guardadas), se
+        queda la MEJOR LEÍDA (menos avisos de preguntas sin marcar o marcas
+        tenues, ver lector_omr.calidad_lectura); si quedan iguales, la más
+        reciente (la que llega después). Las otras y su imagen marcada se
+        quitan. Solo con códigos legibles que estén en la lista del curso (o
+        cualquiera legible si aún no hay lista); un código dudoso no pisa a
+        nadie y queda 'por revisar'.
         Devuelve cuántas hojas anteriores se reemplazaron."""
+        import lector_omr as L
         lista = self._lista_codigos()
         registros = {r.get("archivo", ""): r for r in self._leer_notas()}
         reemplazadas = 0
         for r in nuevos:
+            if r.get("codigo") == "ERROR":
+                continue
+            if r.pop("sin_leer", None):          # calificada a mano: ya es una nota
+                r.pop("error", None)
             cod = str(r.get("codigo", ""))
             if cod.isdigit() and (not lista or cod in lista):
-                for archivo, viejo in list(registros.items()):
-                    if archivo != r["archivo"] and str(viejo.get("codigo", "")) == cod:
-                        del registros[archivo]
-                        self._borrar_imagen(viejo)
-                        reemplazadas += 1
+                rivales = [(a, v) for a, v in registros.items()
+                           if a != r["archivo"] and str(v.get("codigo", "")) == cod]
+                calidad = L.calidad_lectura(r)
+                if any(L.calidad_lectura(v) > calidad for _, v in rivales):
+                    self._borrar_imagen(r)       # la guardada se lee mejor
+                    continue
+                for archivo, viejo in rivales:
+                    del registros[archivo]
+                    self._borrar_imagen(viejo)
+                    reemplazadas += 1
             registros[r["archivo"]] = r
         self._escribir_notas(list(registros.values()))
         return reemplazadas
+
+    def _ruta_original(self, r):
+        """La foto original (archivada) de una hoja, si todavía existe."""
+        nombre = r.get("foto_original")
+        if not nombre:
+            return None
+        import lector_omr as L
+        ruta = App.get_running_app().ruta_curso / L.SUB_ARCHIVADOS / nombre
+        return ruta if ruta.exists() else None
+
+    def _completar_a_mano(self, r, listo=None):
+        """Hoja sin leer de esta sesión que se califica a mano desde la lista:
+        apenas tiene código y respuestas, se guarda como una nota más."""
+        if str(r.get("codigo")) != "ERROR" and r.get("a_mano"):
+            self.errores = [e for e in self.errores if e is not r]
+            self._guardar_registros([r])
+        self.construir()
+        if listo:
+            listo()
 
     def _escribir_notas(self, datos):
         """Guarda las notas del examen. Se escriben primero en un archivo
@@ -3803,6 +3923,38 @@ class CalificarScreen(Screen):
         self._escribir_notas(data)
 
     # ── Corregir una mala lectura (respuestas) ────────────────────────────────
+    def _visor_foto(self, ruta):
+        """La foto de la hoja en un recuadro donde se puede ampliar (dos
+        dedos o la rueda del ratón) y mover; no se sale del recuadro."""
+        from kivy.uix.scatterlayout import ScatterLayout
+        from kivy.uix.stencilview import StencilView
+        import lector_omr as L
+
+        marco = StencilView(size_hint_y=0.45)
+        visor = ScatterLayout(do_rotation=False, scale_min=1.0, scale_max=5.0,
+                              auto_bring_to_front=False)
+        img = Image(fit_mode="contain")
+        foto = L.leer_imagen(ruta)
+        if foto is not None:
+            img.texture = self._np_a_textura(foto)
+        visor.add_widget(img)
+        marco.add_widget(visor)
+
+        def _ajustar(*_):
+            visor.scale = 1.0
+            visor.size = marco.size
+            visor.pos = marco.pos
+        marco.bind(size=_ajustar, pos=_ajustar)
+
+        def _rueda(_w, touch):
+            if marco.collide_point(*touch.pos) and touch.is_mouse_scrolling:
+                factor = 1.15 if touch.button == "scrolldown" else 1 / 1.15
+                visor.scale = max(1.0, min(5.0, visor.scale * factor))
+                return True
+            return False
+        marco.bind(on_touch_down=_rueda)
+        return marco
+
     def _editar_respuestas(self, r, listo=None, guardar=True):
         """
         Ventana para corregir, pregunta por pregunta, lo que leyó el lector
@@ -3837,8 +3989,18 @@ class CalificarScreen(Screen):
 
         cont = BoxLayout(orientation="vertical", spacing=dp(8),
                          padding=[dp(6), dp(8), dp(6), dp(4)])
-        ayuda = ("Toca la letra que de verdad marcó el estudiante "
-                 "(\u2013 = la dejó en blanco).")
+        sin_leer = bool(r.get("sin_leer"))
+        if sin_leer:
+            # Calificar a mano: la foto arriba (se amplía con dos dedos) y la
+            # lista de preguntas abajo
+            ruta = self._ruta_original(r)
+            if ruta is not None:
+                cont.add_widget(self._visor_foto(ruta))
+            ayuda = ("Mira la foto y toca la letra que marcó el estudiante en cada "
+                     "pregunta (\u2013 = en blanco). Amplía la foto con dos dedos.")
+        else:
+            ayuda = ("Toca la letra que de verdad marcó el estudiante "
+                     "(\u2013 = la dejó en blanco).")
         if motivos:
             ayuda += " En ámbar, las que el lector vio dudosas."
         lbl_ayuda = Label(text=ayuda, size_hint_y=None, height=dp(38), font_size="13sp",
@@ -3863,7 +4025,8 @@ class CalificarScreen(Screen):
                              + (f"   [size=13sp][color={GRIS_HEX}]{cambios} cambio"
                                 f"{'s' if cambios != 1 else ''}[/color][/size]"
                                 if cambios else ""))
-            btn_ok.disabled = not cambios
+            # Una hoja calificada a mano se puede guardar aunque quede toda en blanco
+            btn_ok.disabled = not cambios and not (sin_leer and not r.get("a_mano"))
 
         lista = BoxLayout(orientation="vertical", spacing=dp(6), size_hint_y=None,
                           padding=[0, 0, 0, dp(6)])
@@ -3903,12 +4066,16 @@ class CalificarScreen(Screen):
         botones.add_widget(btn_no)
         botones.add_widget(btn_ok)
         cont.add_widget(botones)
-        pop = Popup(title=f"Corregir respuestas  ·  código {r.get('codigo', '???')}",
-                    content=cont, size_hint=(0.96, 0.92))
+        codigo = r.get("codigo", "???")
+        titulo = ("Calificar a mano" if sin_leer else "Corregir respuestas")
+        titulo += ("  ·  sin código" if codigo == "ERROR" else f"  ·  código {codigo}")
+        pop = Popup(title=titulo, content=cont, size_hint=(0.96, 0.92))
         btn_no.bind(on_release=lambda *_: pop.dismiss())
 
         def _ok(*_):
             pop.dismiss()
+            if sin_leer:
+                r["a_mano"] = True
             nuevas = {str(q): v for q, v in elegidas.items()}
             if guardar:
                 # Se corrige el registro guardado (y también el que está en pantalla)

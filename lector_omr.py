@@ -83,6 +83,9 @@ class ResultadoLectura:
     # Qué tan bien calzó la cuadrícula de burbujas con la foto (0 a 1). Muy
     # bajo = la hoja fotografiada no es del formato que espera el examen.
     calce:       float = 1.0
+    # False = ningún juego de marcas confirmó la marca de orientación (hoja
+    # vieja que no la tiene, o algo raro): leer_foto prefiere otra lectura.
+    orientacion_confirmada: bool = True
     # Posiciones de las burbujas ya ajustadas a la foto (ver _ajustar_bloques);
     # None = las del layout tal cual
     burbujas_codigo:    Optional[list[Burbuja]] = None
@@ -198,6 +201,11 @@ RELLENO_CUADRADO: float = 0.85
 # Segundo intento, más tolerante: una esquina doblada o curvada deforma la
 # marca (≈0.81). Solo se acepta si además se confirma la marca de orientación.
 RELLENO_CUADRADO_TOLERANTE: float = 0.78
+# Al comprobar las marcas sobre la hoja enderezada (con luz pareja): un punto
+# es "de la marca" si es más oscuro que esto × el papel. Con impresoras con
+# poco tóner las marcas salen grises (0.5-0.7 del papel en fotos reales):
+# con 0.6 se descartaban y la hoja no se leía.
+FRACCION_MARCA: float = 0.75
 
 
 @dataclass
@@ -330,6 +338,29 @@ def _binarios_marcas(img_gray: np.ndarray) -> tuple[tuple[int, int, int, int], l
     return (px, py, pw, ph), cerrados
 
 
+# Lado de una marca de esquina respecto al lado mayor de la hoja (0.5 cm sobre
+# 21.6 cm en media hoja, sobre 27.9 cm en hoja completa): para la "apertura".
+LADO_MARCA_REL: float = 0.02
+
+
+def _sin_grapas(binarios) -> tuple[tuple[int, int, int, int], list[np.ndarray]]:
+    """
+    Las mismas binarizaciones, pero "abiertas" (erosión + dilatación) con un
+    cuadrado del orden de un tercio de la marca: borra todo lo DELGADO que
+    toca a la marca (una grapa, un rayón, el borde de una sombra) y deja el
+    cuadrado limpio, que vuelve a pasar por cuadrado. Es una segunda pasada:
+    solo se usa si la foto no se pudo leer con las binarizaciones normales.
+    """
+    (px, py, pw, ph), cerrados = binarios
+    lado = LADO_MARCA_REL * max(pw, ph)
+    abiertos = []
+    for fraccion in (0.25, 0.4):
+        k = max(3, int(round(lado * fraccion))) | 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+        abiertos += [cv2.morphologyEx(c, cv2.MORPH_OPEN, kernel) for c in cerrados]
+    return (px, py, pw, ph), abiertos
+
+
 def candidatos_marcas(img_gray: np.ndarray, maximo: int = 6,
                       cuadratura_min: float = RELLENO_CUADRADO,
                       binarios=None) -> list[np.ndarray]:
@@ -386,16 +417,27 @@ def marcas_en_vivo(img_gray: np.ndarray, formato=None, a_fondo: bool = True
     """
     f = LH.obtener(formato)
     binarios = _binarios_marcas(img_gray)
-    marcas = _cuatro_en_vivo(img_gray, f, binarios)
-    if marcas is not None:
-        return marcas, []
-
-    # Igual que leer_foto: con sombra fuerte las marcas se pierden en la foto
-    # tal cual, pero aparecen al "escanear" la hoja (recortada y con luz pareja)
-    try:
-        marcas = _cuatro_en_vivo_escaneada(img_gray, f) if a_fondo else None
-    except Exception:
-        marcas = None
+    marcas, confirmada = _cuatro_en_vivo(img_gray, f, binarios)
+    if not _basta_en_vivo(confirmada, a_fondo):
+        # Se busca un juego con la orientación confirmada; uno sin confirmar
+        # (hoja vieja, o el cuadrito tomado como esquina) queda de reserva.
+        intentos = (
+            # Una grapa o un rayón pegado a una marca: se "limpian"
+            lambda: _cuatro_en_vivo(img_gray, f, _sin_grapas(binarios)),
+            # Igual que leer_foto: con sombra fuerte las marcas se pierden en la
+            # foto tal cual, pero aparecen al "escanear" la hoja (recortada y
+            # con luz pareja)
+            lambda: _cuatro_en_vivo_escaneada(img_gray, f),
+        )
+        for intento in intentos:
+            try:
+                otras, conf = intento()
+            except Exception:
+                continue
+            if otras is not None and (conf or marcas is None):
+                marcas, confirmada = otras, conf
+            if confirmada:
+                break
     if marcas is not None:
         return marcas, []
 
@@ -420,53 +462,135 @@ def marcas_en_vivo(img_gray: np.ndarray, formato=None, a_fondo: bool = True
     return None, [(c.x, c.y) for c in mejor]
 
 
+def _basta_en_vivo(confirmada: bool, a_fondo: bool) -> bool:
+    """Para marcas_en_vivo: ¿basta con lo encontrado? Sí si la orientación
+    está confirmada, o si en este cuadro no toca el intento a fondo."""
+    return confirmada or not a_fondo
+
+
 def _cuatro_en_vivo(img_gray: np.ndarray, f: LH.Formato,
-                    binarios=None) -> Optional[np.ndarray]:
-    """El primer juego de 4 marcas que pasa la comprobación, o None."""
+                    binarios=None) -> tuple[Optional[np.ndarray], bool]:
+    """(marcas, orientación confirmada): el primer juego de 4 marcas que pasa
+    la comprobación, o (None, False).
+    Se prefiere el que tiene la marca de orientación en su lugar; si un
+    juego solo calza tomando la marca de orientación como esquina (una grapa
+    tapó la de verdad), se devuelve con la esquina tapada ya reconstruida.
+    Si nada confirma la orientación, el primero verificado (hoja vieja)."""
     binarios = binarios or _binarios_marcas(img_gray)
+    primera = None
     for cuadratura_min in (RELLENO_CUADRADO, RELLENO_CUADRADO_TOLERANTE):
         for marcas in candidatos_marcas(img_gray, maximo=3,
                                         cuadratura_min=cuadratura_min,
                                         binarios=binarios):
-            if _marcas_en_vivo_verificadas(img_gray, marcas, f):
-                return marcas
-    return None
+            ok, confirmada = _marcas_en_vivo_verificadas(img_gray, marcas, f)
+            if ok and confirmada:
+                return marcas, True
+            reales = _esquina_tapada(img_gray, marcas, f)
+            if reales is not None:
+                return reales, True
+            if ok and primera is None:
+                primera = marcas      # hoja vieja, sin marca de orientación
+    return primera, False
 
 
-def _cuatro_en_vivo_escaneada(img_gray: np.ndarray, f: LH.Formato) -> Optional[np.ndarray]:
+def _cuatro_en_vivo_escaneada(img_gray: np.ndarray, f: LH.Formato
+                              ) -> tuple[Optional[np.ndarray], bool]:
     """Busca las 4 marcas sobre la hoja recortada y con luz pareja (como hace
-    el digitalizador) y las devuelve en coordenadas del cuadro original."""
+    el digitalizador) y las devuelve en coordenadas del cuadro original,
+    con si se confirmó la orientación."""
     esquinas = D.detectar_hoja(cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR))
     if esquinas is None:
-        return None
+        return None, False
     tl, tr, br, bl = D.ordenar_esquinas(esquinas)
     ancho = int(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl)))
     alto = int(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr)))
     if ancho < 50 or alto < 50:
-        return None
+        return None, False
     destino = np.float32([[0, 0], [ancho - 1, 0], [ancho - 1, alto - 1], [0, alto - 1]])
     M = cv2.getPerspectiveTransform(np.float32([tl, tr, br, bl]), destino)
     hoja = cv2.warpPerspective(img_gray, M, (ancho, alto),
                                borderMode=cv2.BORDER_REPLICATE)
     hoja = D.aplanar_iluminacion(hoja)
-    marcas = _cuatro_en_vivo(hoja, f)
+    marcas, confirmada = _cuatro_en_vivo(hoja, f)
     if marcas is None:
-        return None
+        return None, False
     return cv2.perspectiveTransform(marcas.reshape(1, 4, 2).astype(np.float32),
-                                    np.linalg.inv(M)).reshape(4, 2)
+                                    np.linalg.inv(M)).reshape(4, 2), confirmada
 
 
 def _marcas_en_vivo_verificadas(img_gray: np.ndarray, marcas: np.ndarray,
-                                f: LH.Formato) -> bool:
+                                f: LH.Formato) -> tuple[bool, bool]:
     """Endereza el cuadro a 1 px/pt (pequeño y rápido) y comprueba que en las
-    4 esquinas haya un cuadrado negro rodeado de papel."""
+    4 esquinas haya un cuadrado negro rodeado de papel.
+    Devuelve (verificadas, orientación confirmada)."""
     try:
         orden = _orientar_marcas(img_gray, marcas, f)
         M = cv2.getPerspectiveTransform(orden, esquinas_pdf(f))
         recta = cv2.warpPerspective(img_gray, M, (int(f.ancho), int(f.alto)))
-        return _marcas_verificadas(recta, 1.0, f.clave)
+        gris = _gris_aplanado(recta, 1.0)
+        if not (_marcas_verificadas(recta, 1.0, f.clave, gris)
+                and _calce_codigo(gris, f) >= CALCE_SEGURO):
+            return False, False
+        return True, _orientacion_confirmada(recta, 1.0, f.clave, gris)
     except Exception:
-        return False
+        return False, False
+
+
+def _calce_codigo(gris_1pt: np.ndarray, f: LH.Formato) -> float:
+    """Qué tan bien calzan los círculos del CÓDIGO con la hoja enderezada a
+    1 px/pt (0 a 1). Es la prueba final de que las 4 marcas son las de
+    verdad: medido en fotos reales y simuladas, con las marcas correctas da
+    0.43-0.69; con un juego equivocado (el cuadrito de orientación tomado
+    como esquina, burbujas en una sombra), 0.26 o menos. Es pequeño y rápido."""
+    oscuro = cv2.GaussianBlur(255 - gris_1pt, (3, 3), 0)
+    _, calce = _ajustar_bloques(oscuro, calcular_burbujas_codigo(f), lambda b: 0,
+                                1.0, f.radio)
+    return calce
+
+
+def _esquina_tapada(img_gray: np.ndarray, marcas: np.ndarray,
+                    f: LH.Formato) -> Optional[np.ndarray]:
+    """
+    ¿Una grapa (o un dedo, o un doblez) tapó la marca superior-izquierda y lo
+    que se tomó como esa esquina es en realidad la marca de orientación, que
+    está justo debajo? Pasa con las hojas engrapadas: la marca deja de verse
+    cuadrada y la de orientación, casi del mismo tamaño, le gana. Si se lee
+    así, la cuadrícula queda corrida casi una fila y las respuestas no calzan.
+
+    La hoja tiene 5 puntos de referencia (4 esquinas + orientación) y para
+    enderezarla bastan 4. Se prueba la hipótesis "estos 4 puntos son la
+    marca de orientación y las otras 3 esquinas", en los 4 giros: se acepta
+    si las 3 esquinas son marcas de verdad, la esquina tapada es oscura (la
+    marca, con la grapa encima), la orientación se confirma y los círculos
+    del código calzan (ver _calce_codigo).
+
+    Devuelve las 4 esquinas REALES en la foto [arriba-izq, arriba-der,
+    abajo-der, abajo-izq] (la tapada, reconstruida), o None.
+    """
+    gray = cv2.cvtColor(img_gray, cv2.COLOR_BGR2GRAY) if img_gray.ndim == 3 else img_gray
+    esquinas = esquinas_pdf(f)
+    destino = esquinas.copy()
+    ox, oy, _ = f.orientacion()
+    destino[0] = (ox, oy)
+    p = marcas.astype(np.float32)
+    for g in range(4):
+        cand = np.roll(p, -g, axis=0)
+        try:
+            M = cv2.getPerspectiveTransform(cand, destino)
+            recta = cv2.warpPerspective(gray, M, (int(f.ancho), int(f.alto)))
+        except cv2.error:
+            continue
+        gris = _gris_aplanado(recta, 1.0)
+        if not (_marcas_verificadas(recta, 1.0, f.clave, gris, tapada=True)
+                and _orientacion_confirmada(recta, 1.0, f.clave, gris)
+                and _calce_codigo(gris, f) >= CALCE_SEGURO):
+            continue
+        try:
+            inv = np.linalg.inv(M)
+        except np.linalg.LinAlgError:
+            continue
+        return cv2.perspectiveTransform(esquinas.reshape(1, 4, 2), inv).reshape(4, 2)
+    return None
 
 
 def _relleno_cuadro(gray: np.ndarray, cx: float, cy: float, lado: float,
@@ -510,7 +634,7 @@ def _orientar_marcas(img: np.ndarray, marcas: np.ndarray, f: LH.Formato) -> np.n
         M = cv2.getPerspectiveTransform(cand, destino)
         w = cv2.warpPerspective(gray, M, (int(f.ancho), int(f.alto)))
         w = D.aplanar_iluminacion(w, int(1.1 * CM))
-        umbral = 0.6 * _mediana(w)
+        umbral = FRACCION_MARCA * _mediana(w)
         dentro = _relleno_cuadro(w, ox, oy, lado, 1.0, umbral)
         opuesto = _relleno_cuadro(w, f.ancho - ox, f.alto - oy, lado, 1.0, umbral)
         if dentro >= 0.6 and dentro - opuesto > max(0.4, mejor_dif):
@@ -1166,7 +1290,7 @@ def _orientacion_confirmada(recta: np.ndarray, scale: float, formato=None,
     gris: _gris_aplanado(recta, scale) si ya se calculó."""
     f = LH.obtener(formato)
     gray = _gris_aplanado(recta, scale) if gris is None else gris
-    umbral = 0.6 * _mediana(gray)
+    umbral = FRACCION_MARCA * _mediana(gray)
     ox, oy, lado = f.orientacion()
     dentro = _relleno_cuadro(gray, ox, oy, lado, scale, umbral)
     opuesto = _relleno_cuadro(gray, f.ancho - ox, f.alto - oy, lado, scale, umbral)
@@ -1174,19 +1298,23 @@ def _orientacion_confirmada(recta: np.ndarray, scale: float, formato=None,
 
 
 def _marcas_verificadas(recta: np.ndarray, scale: float, formato=None,
-                        gris=None) -> bool:
+                        gris=None, tapada: bool = False) -> bool:
     """
     Sobre la hoja ya enderezada, comprueba que en las 4 esquinas haya de
     verdad un cuadrado negro rodeado de papel blanco. Si las "marcas" eran
     otra cosa (burbujas, manchas, un trozo de borde), la hoja enderezada sale
     deformada y esto falla, en vez de calificar con la cuadrícula corrida.
+
+    tapada=True: la esquina superior-izquierda puede tener una grapa encima
+    (ver _esquina_tapada). Ahí solo se pide que sea oscura y que alrededor
+    haya sobre todo papel (la grapa es delgada; la mesa, no).
     """
     f = LH.obtener(formato)
     gray = _gris_aplanado(recta, scale) if gris is None else gris
-    umbral = 0.6 * _mediana(gray)
+    umbral = FRACCION_MARCA * _mediana(gray)
     oscuro = gray < umbral
     tam = f.tam_marca * scale
-    for cx, cy in esquinas_pdf(f) * scale:
+    for i, (cx, cy) in enumerate(esquinas_pdf(f) * scale):
         x, y = int(cx), int(cy)
 
         def caja(semi):
@@ -1202,7 +1330,8 @@ def _marcas_verificadas(recta: np.ndarray, scale: float, formato=None,
         n_anillo = externo.size - interno.size
         if n_anillo <= 0:
             return False
-        if (externo.sum() - interno.sum()) / n_anillo > 0.3:
+        maximo = 0.5 if (tapada and i == 0) else 0.3
+        if (externo.sum() - interno.sum()) / n_anillo > maximo:
             return False
     return True
 
@@ -1221,33 +1350,83 @@ def leer_hoja(img_bgr: np.ndarray, num_preguntas: int, formato=None,
         ValueError si no se ven las 4 marcas (mensaje listo para el docente).
     """
     img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    f = LH.obtener(formato)
     binarios = _binarios_marcas(img_gray)
-    primera = None          # la primera hoja verificada, por si ninguna confirma la orientación
-    for cuadratura_min in (RELLENO_CUADRADO, RELLENO_CUADRADO_TOLERANTE):
-        for marcas in candidatos_marcas(img_gray, cuadratura_min=cuadratura_min,
-                                        binarios=binarios):
-            try:
-                recta, scale = corregir_perspectiva(img_bgr, marcas, formato)
-            except ValueError:
-                continue
-            gris = _gris_aplanado(recta, scale)
-            if not _marcas_verificadas(recta, scale, formato, gris):
-                continue
-            # Con la marca de orientación en su lugar no hay duda: es la hoja.
-            # Si no aparece, puede ser una hoja vieja (no la tiene) o que se
-            # tomó la marca de orientación como esquina (p. ej. con la
-            # esquina doblada): se sigue buscando y, si nada la confirma, se
-            # usa la primera verificada.
-            if _orientacion_confirmada(recta, scale, formato, gris):
-                return recta, scale, leer_respuestas(recta, num_preguntas, scale,
-                                                     formato, gris, preguntas_hoja)
-            if primera is None:
-                primera = (recta, scale, gris)
-    if primera is None:
+    vistos: list[np.ndarray] = []      # juegos probados, para el último intento
+
+    def juegos():
+        # 1.ª pasada: binarizaciones normales. 2.ª: las mismas sin lo delgado
+        # pegado a las marcas (grapas, rayones), solo si la 1.ª no bastó.
+        for b in (binarios, None):
+            b = b or _sin_grapas(binarios)
+            for cuadratura_min in (RELLENO_CUADRADO, RELLENO_CUADRADO_TOLERANTE):
+                for marcas in candidatos_marcas(img_gray, cuadratura_min=cuadratura_min,
+                                                binarios=b):
+                    if any(np.abs(marcas - v).max() < 3 for v in vistos):
+                        continue
+                    vistos.append(marcas)
+                    yield marcas
+
+    # Cada juego de marcas que pasa las comprobaciones da una lectura. Se
+    # acepta de inmediato una con la orientación confirmada Y cuya cuadrícula
+    # de burbujas calce bien con la foto (eso no pasa con marcas equivocadas:
+    # p. ej. el cuadrito de orientación tomado como esquina deja la cuadrícula
+    # corrida casi una fila). Si ninguna, se elige la mejor de todas.
+    lecturas = []
+    primera = None          # verificada sin orientación (hoja vieja), se lee al final
+
+    def mejor_lectura():
+        return max(lecturas, key=lambda t: (t[2].calce >= CALCE_SEGURO,
+                                            t[2].orientacion_confirmada, t[2].calce))
+
+    for marcas in juegos():
+        try:
+            recta, scale = corregir_perspectiva(img_bgr, marcas, formato)
+        except ValueError:
+            continue
+        gris = _gris_aplanado(recta, scale)
+        if not _marcas_verificadas(recta, scale, formato, gris):
+            continue
+        # Con la marca de orientación en su lugar no hay duda: es la hoja.
+        # Si no aparece, puede ser una hoja vieja (no la tiene) o que se
+        # tomó la marca de orientación como esquina (p. ej. con la esquina
+        # engrapada o doblada): se sigue buscando.
+        if _orientacion_confirmada(recta, scale, formato, gris):
+            r = leer_respuestas(recta, num_preguntas, scale, formato, gris, preguntas_hoja)
+            if r.calce >= CALCE_SEGURO:
+                return recta, scale, r
+            lecturas.append((recta, scale, r))
+        elif primera is None:
+            primera = (recta, scale, gris)
+
+    # ¿Una grapa tapó la esquina superior-izquierda y se tomó la marca de
+    # orientación en su lugar? Se reconstruye esa esquina con los otros 4
+    # puntos de referencia (ver _esquina_tapada).
+    for marcas in vistos:
+        reales = _esquina_tapada(img_gray, marcas, f)
+        if reales is None:
+            continue
+        try:
+            recta, scale = corregir_perspectiva(img_bgr, reales, formato)
+        except ValueError:
+            continue
+        gris = _gris_aplanado(recta, scale)
+        if not (_marcas_verificadas(recta, scale, formato, gris, tapada=True)
+                and _orientacion_confirmada(recta, scale, formato, gris)):
+            continue
+        r = leer_respuestas(recta, num_preguntas, scale, formato, gris, preguntas_hoja)
+        lecturas.append((recta, scale, r))
+        if r.calce >= CALCE_SEGURO:
+            return mejor_lectura()
+
+    if primera is not None:
+        recta, scale, gris = primera
+        r = leer_respuestas(recta, num_preguntas, scale, formato, gris, preguntas_hoja)
+        r.orientacion_confirmada = False
+        lecturas.append((recta, scale, r))
+    if not lecturas:
         raise ValueError(MENSAJE_SIN_MARCAS)
-    recta, scale, gris = primera
-    return recta, scale, leer_respuestas(recta, num_preguntas, scale, formato, gris,
-                                         preguntas_hoja)
+    return mejor_lectura()
 
 
 # Calce mínimo de la cuadrícula de burbujas con la foto. Medido con hojas de
@@ -1300,22 +1479,31 @@ def leer_foto(img_bgr: np.ndarray, num_preguntas: int, formato=None,
         print(f"  ⚠️  Digitalizador: {e}")
         escaneada = None
     sin_calce = False
+    reserva = None      # lectura sin la orientación confirmada, por si no hay otra
     if escaneada is not None:
         try:
             leida = leer_hoja(escaneada, num_preguntas, formato, preguntas_hoja)
             if leida[2].calce >= CALCE_MINIMO:
-                return leida
-            sin_calce = True
+                if leida[2].orientacion_confirmada:
+                    return leida
+                reserva = leida
+            else:
+                sin_calce = True
         except ValueError:
             pass
     try:
         leida = leer_hoja(img_bgr, num_preguntas, formato, preguntas_hoja)
     except ValueError:
+        if reserva is not None:
+            return reserva
         if not sin_calce:
             raise
     else:
-        if leida[2].calce >= CALCE_MINIMO:
+        if leida[2].calce >= CALCE_MINIMO and (leida[2].orientacion_confirmada
+                                               or reserva is None):
             return leida
+        if reserva is not None:
+            return reserva
     raise ValueError(_mensaje_otra_hoja(img_bgr, formato))
 
 
@@ -1480,13 +1668,21 @@ def calificar_foto(ruta_cruda: Path, ruta_json: Path, ruta_curso: Path,
         guardar_imagen(salida / registro["imagen"], anotada)
 
     # 4. Archivar la original, reducida
+    archivada = None
     try:
-        archivar_reducida(ruta_cruda, archivados, original)
+        archivada = archivar_reducida(ruta_cruda, archivados, original)
     except Exception:
         pass
 
     if resultado is None:
-        registro.update({"codigo": "ERROR", "aciertos": 0, "error": ultimo_error})
+        # No se pudo leer: queda lista para calificarla a mano mirando la
+        # foto original (código y respuestas, ver main.py → GaleriaHojas)
+        registro.update({"codigo": "ERROR", "aciertos": 0, "error": ultimo_error,
+                         "sin_leer": True,
+                         "respuestas": {str(q): None
+                                        for q in range(1, datos.total_preguntas + 1)}})
+        if archivada is not None:
+            registro["foto_original"] = archivada.name
         return registro
 
     aciertos = sum(1 for p, r in resultado.respuestas.items()
@@ -1498,11 +1694,35 @@ def calificar_foto(ruta_cruda: Path, ruta_json: Path, ruta_curso: Path,
     })
     # Lo que conviene mirar en la hoja (la app lo muestra junto a la nota)
     alertas = {"doble": resultado.doble_marca, "dudosas": resultado.dudosas,
-               "tenues": resultado.tenues, "marcas_extra": resultado.marcas_extra}
+               "tenues": resultado.tenues, "marcas_extra": resultado.marcas_extra,
+               # Las burbujas no calzaron bien con la cuadrícula: puede que la
+               # hoja se haya enderezado mal y las respuestas estén corridas
+               "cuadricula": resultado.calce < CALCE_SEGURO}
     alertas = {k: v for k, v in alertas.items() if v}
     if alertas:
         registro["alertas"] = alertas
     return registro
+
+
+def calidad_lectura(registro: dict) -> tuple:
+    """
+    Qué tan confiable es la lectura de una hoja, para elegir entre dos fotos
+    del mismo estudiante (mayor = mejor; el que llame desempata con la más
+    reciente).
+
+      1. Una hoja que el docente ya revisó a mano (respuestas corregidas o
+         calificada a mano) le gana a cualquier lectura automática.
+      2. Luego, la que calzó bien con la cuadrícula.
+      3. Luego, la que tiene MENOS avisos: preguntas sin marcar (en blanco,
+         doble marca o marca débil: todas quedan sin respuesta) y marcas
+         muy claras. No se mira la nota: puede subir o bajar.
+    """
+    alertas = registro.get("alertas") or {}
+    respuestas = registro.get("respuestas") or {}
+    sin_marcar = sum(1 for v in respuestas.values() if not v)
+    avisos = sin_marcar + len(alertas.get("tenues") or [])
+    revisada = bool(registro.get("respuestas_corregidas") or registro.get("a_mano"))
+    return (revisada, not alertas.get("cuadricula"), -avisos)
 
 
 def corregir_respuestas(registro: dict, nuevas: dict, clave: dict[int, str]) -> list[int]:
@@ -1534,6 +1754,7 @@ def corregir_respuestas(registro: dict, nuevas: dict, clave: dict[int, str]) -> 
     for tipo in ("doble", "dudosas", "tenues"):
         if tipo in alertas:
             alertas[tipo] = [q for q in alertas[tipo] if q not in cambiadas]
+    alertas.pop("cuadricula", None)       # el docente ya revisó la hoja
     alertas = {k: v for k, v in alertas.items() if v}
     if alertas:
         registro["alertas"] = alertas
